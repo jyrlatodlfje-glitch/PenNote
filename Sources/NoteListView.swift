@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum Route: Hashable {
     case folder(UUID)
@@ -35,6 +36,9 @@ struct NoteBrowser: View {
     @State private var prompt: Prompt?
     @State private var showPrompt = false
     @State private var promptText = ""
+    @State private var showPDFImporter = false
+    @State private var importing = false
+    @State private var importFailed = false
 
     enum Prompt {
         case newFolder
@@ -92,11 +96,31 @@ struct NoteBrowser: View {
                     }
                 }
                 Button {
+                    showPDFImporter = true
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .disabled(importing)
+                Button {
                     path.append(.note(store.addNote(in: folderID).id))
                 } label: {
                     Image(systemName: "plus")
                 }
             }
+        }
+        .overlay {
+            if importing {
+                ProgressView("PDF를 불러오는 중")
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
+        .fileImporter(isPresented: $showPDFImporter, allowedContentTypes: [.pdf]) { result in
+            guard case .success(let url) = result else { return }
+            importPDF(url)
+        }
+        .alert("PDF를 불러오지 못했습니다", isPresented: $importFailed) {
+            Button("확인", role: .cancel) {}
         }
         .alert(prompt?.title ?? "", isPresented: $showPrompt) {
             TextField("이름", text: $promptText)
@@ -168,6 +192,24 @@ struct NoteBrowser: View {
                 ask(.renameNote(note), text: note.title)
             }
             .tint(.blue)
+        }
+    }
+
+    private func importPDF(_ url: URL) {
+        importing = true
+        let pageWidth = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        let folderID = folderID
+        Task.detached {
+            let note = PDFImporter.makeNote(from: url, pageWidth: pageWidth, folderID: folderID)
+            await MainActor.run {
+                importing = false
+                if let note {
+                    store.add(note)
+                    path.append(.note(note.id))
+                } else {
+                    importFailed = true
+                }
+            }
         }
     }
 

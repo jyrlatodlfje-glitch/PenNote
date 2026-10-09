@@ -27,6 +27,7 @@ targets:
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: 회의 내용을 노트에 녹음하기 위해 마이크를 사용합니다.
         NSCameraUsageDescription: 사진을 찍어 노트에 넣기 위해 카메라를 사용합니다.
+        NSSpeechRecognitionUsageDescription: 말한 내용을 글자로 받아 적기 위해 음성 인식을 사용합니다.
         UIBackgroundModes: [audio]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

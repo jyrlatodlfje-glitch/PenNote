@@ -115,6 +115,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             note.texts.forEach { layoutText($0.id) }
         }
         updateContentSize()
+        updateVisibleImages()
     }
 
     // MARK: - 도구
@@ -170,20 +171,31 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         let width = max(bounds.width, 100)
         // 줄 중간에서 쪽이 나뉘지 않게 쪽 높이를 줄 간격의 배수로 맞춘다.
         let pageHeight = (width * 297 / 210 / line).rounded(.down) * line
-        let pageCount = max(1, Int((contentBottom() / pageHeight).rounded(.up)))
-        let pageRect = CGRect(x: 0, y: 0, width: width, height: pageHeight)
+        let bottom = contentBottom()
         let drawing = canvas.drawing
+        let imageFolder = NoteStore.imageFolder(for: note.id)
 
-        return UIGraphicsPDFRenderer(bounds: pageRect).pdfData { context in
-            for page in 0..<pageCount {
-                context.beginPage()
-                let visible = pageRect.offsetBy(dx: 0, dy: CGFloat(page) * pageHeight)
+        // 불러온 PDF는 원래 쪽 경계대로, 그 밖의 부분은 A4 비율로 나눈다.
+        var pages: [CGRect] = []
+        var top: CGFloat = 0
+        for pageEnd in note.pageBreaks ?? [] where pageEnd > top {
+            pages.append(CGRect(x: 0, y: top, width: width, height: pageEnd - top))
+            top = pageEnd
+        }
+        while pages.isEmpty || bottom > top + 10 {
+            pages.append(CGRect(x: 0, y: top, width: width, height: pageHeight))
+            top += pageHeight
+        }
+
+        return UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: pages[0].size)).pdfData { context in
+            for visible in pages {
+                context.beginPage(withBounds: CGRect(origin: .zero, size: visible.size), pageInfo: [:])
                 context.cgContext.saveGState()
                 context.cgContext.translateBy(x: 0, y: -visible.minY)
 
                 if note.template != .blank {
                     UIColor(white: 0.8, alpha: 1).setFill()
-                    var y = visible.minY + line - 1
+                    var y = ((visible.minY + 1) / line).rounded(.up) * line - 1
                     while y < visible.maxY {
                         context.fill(CGRect(x: 0, y: y, width: width, height: 1))
                         y += line
@@ -191,14 +203,15 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                     if note.template == .grid {
                         var x = line - 1
                         while x < width {
-                            context.fill(CGRect(x: x, y: visible.minY, width: 1, height: pageHeight))
+                            context.fill(CGRect(x: x, y: visible.minY, width: 1, height: visible.height))
                             x += line
                         }
                     }
                 }
                 for item in note.images {
                     if let view = imageViews[item.id], view.frame.intersects(visible) {
-                        view.image?.draw(in: view.frame)
+                        UIImage(contentsOfFile: imageFolder.appendingPathComponent(item.fileName).path)?
+                            .draw(in: view.frame)
                     }
                 }
                 for item in note.texts {
@@ -230,6 +243,13 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         textView.typingAttributes = Self.textAttributes
         textView.insertText(string)
         textViewDidChange(textView)
+    }
+
+    /// 커서 앞에 있는 글. 선택된 글상자가 없으면 빈 문자열.
+    func textBeforeCursor() -> String {
+        guard let textView = selectedTextView else { return "" }
+        let text = textView.text as NSString
+        return text.substring(to: min(textView.selectedRange.location, text.length))
     }
 
     /// 기존 내용과 겹치지 않게 페이지 맨 아래에 새 글상자로 넣는다.
@@ -296,6 +316,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                              fileName: fileName)
         note.images.append(item)
         addImageView(for: item)
+        updateVisibleImages()
         select(item.id)
         commit()
     }
@@ -408,7 +429,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             return path.contains(CGPoint(x: rect.midX, y: rect.midY)) || rect.contains(loopCenter)
         }
         let images = note.images.filter { item in
-            guard let frame = imageViews[item.id]?.frame else { return false }
+            guard item.locked != true, let frame = imageViews[item.id]?.frame else { return false }
             return path.contains(CGPoint(x: frame.midX, y: frame.midY))
         }
         lassoItems = texts.map { $0.id } + images.map { $0.id }
@@ -560,7 +581,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         if let text = note.texts.last(where: { textViews[$0.id]?.frame.insetBy(dx: -6, dy: -6).contains(point) == true }) {
             return text.id
         }
-        return note.images.last { imageViews[$0.id]?.frame.contains(point) == true }?.id
+        return note.images.last { $0.locked != true && imageViews[$0.id]?.frame.contains(point) == true }?.id
     }
 
     private func select(_ id: UUID) {
@@ -642,13 +663,38 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     }
 
     private func addImageView(for item: ImageItem) {
-        let url = NoteStore.imageFolder(for: note.id).appendingPathComponent(item.fileName)
-        let imageView = UIImageView(image: UIImage(contentsOfFile: url.path))
+        // 이미지 내용은 화면 근처에 올 때 읽는다(updateVisibleImages).
+        let imageView = UIImageView()
         imageView.contentMode = .scaleToFill
         imageView.frame = CGRect(x: item.x, y: item.y, width: item.width, height: item.height)
+        if item.locked == true {
+            imageView.layer.borderColor = UIColor(white: 0.8, alpha: 1).cgColor
+            imageView.layer.borderWidth = 0.5
+        }
         // 사진은 글자 아래에 둔다.
         underlay.insertSubview(imageView, at: imageViews.count)
         imageViews[item.id] = imageView
+    }
+
+    /// 쪽수가 많은 PDF에서도 메모리가 넘치지 않게, 화면 근처의 이미지만 올려 둔다.
+    private func updateVisibleImages() {
+        let near = CGRect(origin: canvas.contentOffset, size: canvas.bounds.size)
+            .insetBy(dx: 0, dy: -canvas.bounds.height)
+        let folder = NoteStore.imageFolder(for: note.id)
+        for item in note.images {
+            guard let view = imageViews[item.id] else { continue }
+            if view.frame.intersects(near) {
+                if view.image == nil {
+                    view.image = UIImage(contentsOfFile: folder.appendingPathComponent(item.fileName).path)
+                }
+            } else if view.image != nil {
+                view.image = nil
+            }
+        }
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateVisibleImages()
     }
 
     private func layoutText(_ id: UUID) {

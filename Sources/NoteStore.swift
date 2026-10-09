@@ -27,6 +27,8 @@ struct ImageItem: Identifiable, Codable, Equatable {
     var width: CGFloat
     var height: CGFloat
     var fileName: String
+    /// 불러온 PDF의 쪽처럼 배경으로 고정된 이미지. 선택하거나 옮길 수 없다.
+    var locked: Bool?
 }
 
 struct Note: Identifiable, Codable, Equatable {
@@ -41,6 +43,8 @@ struct Note: Identifiable, Codable, Equatable {
     var name: String?
     /// 들어 있는 폴더. nil이면 폴더 밖.
     var folderID: UUID?
+    /// 불러온 PDF의 쪽이 끝나는 세로 위치들. PDF로 내보낼 때 같은 자리에서 쪽을 나눈다.
+    var pageBreaks: [CGFloat]?
 
     var title: String {
         if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
@@ -95,6 +99,11 @@ final class NoteStore: ObservableObject {
         notes.insert(note, at: 0)
         write(note)
         return note
+    }
+
+    func add(_ note: Note) {
+        notes.insert(note, at: 0)
+        write(note)
     }
 
     func move(_ noteID: UUID, to folderID: UUID?) {

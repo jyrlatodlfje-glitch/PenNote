@@ -5,7 +5,7 @@ struct RecordingsView: View {
     @ObservedObject var audio: AudioRecorder
     let onTranscript: (String) -> Void
 
-    @StateObject private var transcriber = Transcriber()
+    @ObservedObject private var transcriber = Transcriber.shared
     @State private var showImporter = false
     @Environment(\.dismiss) private var dismiss
 

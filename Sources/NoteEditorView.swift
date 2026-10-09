@@ -77,6 +77,10 @@ struct NoteEditorView: View {
     @StateObject private var page = PageController()
     @StateObject private var pad = PadController()
     @StateObject private var audio: AudioRecorder
+    @StateObject private var dictation = Dictation()
+
+    /// 음성 입력 중 현재 구간에서 페이지에 넣은 글. 인식이 고쳐질 때마다 이 부분을 바꿔 쓴다.
+    @State private var dictatedSegment = ""
 
     @State private var note: Note
     @State private var tool = PageTool.select
@@ -153,7 +157,7 @@ struct NoteEditorView: View {
                 Button {
                     audio.toggleRecording()
                 } label: {
-                    Image(systemName: audio.isRecording ? "stop.circle.fill" : "mic")
+                    Image(systemName: audio.isRecording ? "stop.circle.fill" : "record.circle")
                         .foregroundColor(audio.isRecording ? .red : .accentColor)
                 }
                 Button {
@@ -190,7 +194,16 @@ struct NoteEditorView: View {
                 photoItem = nil
             }
         }
-        .alert("녹음", isPresented: Binding(
+        .onChange(of: dictation.errorMessage) { message in
+            if let message {
+                audio.errorMessage = message
+                dictation.errorMessage = nil
+            }
+        }
+        .onDisappear {
+            dictation.stop()
+        }
+        .alert("알림", isPresented: Binding(
             get: { audio.errorMessage != nil },
             set: { if !$0 { audio.errorMessage = nil } }
         )) {
@@ -303,6 +316,10 @@ struct NoteEditorView: View {
     @ViewBuilder
     private var statusBar: some View {
         Group {
+            if dictation.isListening {
+                Text("듣는 중 (\(recognizer.language == .english ? "English" : "한국어")) · 마이크를 다시 누르면 끝납니다")
+                    .foregroundColor(.red)
+            } else {
             switch recognizer.state {
             case .downloading:
                 Text("인식 모델을 내려받는 중입니다 (언어별 최초 1회)")
@@ -326,6 +343,7 @@ struct NoteEditorView: View {
                     }
                 }
             }
+            }
         }
         .font(.footnote)
         .frame(maxWidth: .infinity, minHeight: 40)
@@ -334,8 +352,15 @@ struct NoteEditorView: View {
     private var keyRow: some View {
         HStack(spacing: 0) {
             key(text: recognizer.language.label) {
-                recognizer.language = recognizer.language == .korean ? .english : .korean
+                stopDictation()
+                recognizer.language = recognizer.language.next
                 pad.clear()
+            }
+            Button(action: toggleDictation) {
+                Image(systemName: dictation.isListening ? "stop.fill" : "mic.fill")
+                    .foregroundColor(dictation.isListening ? .red : .accentColor)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
             }
             key(icon: "scribble") { pad.undoLastStroke() }
             key(icon: "space") { type(" ") }
@@ -363,6 +388,36 @@ struct NoteEditorView: View {
         }
     }
 
+    private func toggleDictation() {
+        if dictation.isListening {
+            stopDictation()
+            return
+        }
+        guard !audio.isRecording else {
+            audio.errorMessage = "녹음 중에는 음성 입력을 함께 쓸 수 없습니다."
+            return
+        }
+        alternatives = []
+        dictatedSegment = ""
+        dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR") { text, segmentEnded in
+            guard !text.isEmpty else { return }
+            if !page.replaceBeforeCursor(dictatedSegment, with: text) {
+                page.insert(text)
+            }
+            dictatedSegment = text
+            if segmentEnded {
+                page.insert(" ")
+                dictatedSegment = ""
+            }
+        }
+    }
+
+    private func stopDictation() {
+        guard dictation.isListening else { return }
+        dictation.stop()
+        dictatedSegment = ""
+    }
+
     private func exportPDF() {
         guard let data = page.makePDF() else { return }
         let name = note.title
@@ -383,7 +438,7 @@ struct NoteEditorView: View {
     }
 
     private func recognize(_ strokes: [[StrokeSample]]) {
-        recognizer.recognize(strokes) { texts in
+        recognizer.recognize(strokes, area: pad.size, preceding: page.textBeforeCursor()) { texts in
             guard let best = texts.first else { return }
             page.insert(best)
             lastInserted = best

@@ -3,6 +3,9 @@ import WhisperKit
 
 /// 녹음 파일을 텍스트로 바꾼다. 여러 언어를 함께 다루는 Whisper 모델을 기기 안에서 돌린다.
 final class Transcriber: ObservableObject {
+    /// 인식 모델을 한 번만 올려 두고 함께 쓴다.
+    static let shared = Transcriber()
+
     @Published private(set) var busy: URL?
     @Published private(set) var status = ""
     @Published var errorMessage: String?

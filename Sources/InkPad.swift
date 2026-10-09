@@ -119,6 +119,8 @@ final class InkPadView: UIView {
 final class PadController: ObservableObject {
     fileprivate(set) weak var view: InkPadView?
 
+    var size: CGSize { view?.bounds.size ?? .zero }
+
     func undoLastStroke() { view?.undoLastStroke() }
     func clear() { view?.clear() }
 }

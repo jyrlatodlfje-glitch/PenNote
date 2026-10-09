@@ -439,20 +439,30 @@ struct NoteEditorView: View {
         }
         // 제목란에 적은 제목이 있으면 첫 줄에 붙인다. 없으면 본문 첫 줄이 곧 제목이라 중복하지 않는다.
         let title = titleText.trimmingCharacters(in: .whitespaces)
-        sharedItem = SharedItem(item: title.isEmpty ? body : title + "\n\n" + body)
+        let text = (title.isEmpty ? body : title + "\n\n" + body)
+            .replacingOccurrences(of: "\n", with: "\r\n")
+        // PC의 메모장 등에서 한글이 깨지지 않도록 UTF-8 표식(BOM)을 붙이고 줄바꿈도 Windows 방식으로 쓴다.
+        share(Data([0xEF, 0xBB, 0xBF]) + Data(text.utf8), fileExtension: "txt")
     }
 
     private func exportPDF() {
         guard let data = page.makePDF() else { return }
+        share(data, fileExtension: "pdf")
+    }
+
+    /// 노트 제목을 파일 이름으로 해서 임시 파일을 만들고 공유 화면을 연다.
+    private func share(_ data: Data, fileExtension: String) {
         let name = note.title
             .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
             .joined(separator: " ")
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name + ".pdf")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(name)
+            .appendingPathExtension(fileExtension)
         do {
             try data.write(to: url, options: .atomic)
             sharedItem = SharedItem(item: url)
         } catch {
-            audio.errorMessage = "PDF를 만들지 못했습니다: \(error.localizedDescription)"
+            audio.errorMessage = "파일을 만들지 못했습니다: \(error.localizedDescription)"
         }
     }
 

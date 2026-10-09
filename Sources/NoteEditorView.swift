@@ -93,9 +93,7 @@ struct NoteEditorView: View {
     @State private var showCamera = false
     @State private var showPhotoLibrary = false
     @State private var photoItem: PhotosPickerItem?
-    @State private var sharedFile: SharedFile?
-    @State private var showOneNoteSettings = false
-    @State private var sendingToOneNote = false
+    @State private var sharedItem: SharedItem?
     @State private var titleText: String
     @FocusState private var titleFocused: Bool
 
@@ -184,18 +182,8 @@ struct NoteEditorView: View {
                 page.appendBlock(transcript)
             }
         }
-        .sheet(item: $sharedFile) { file in
-            ActivityView(url: file.url)
-        }
-        .sheet(isPresented: $showOneNoteSettings) {
-            OneNoteSettingsView()
-        }
-        .overlay {
-            if sendingToOneNote {
-                ProgressView("OneNote로 보내는 중")
-                    .padding(24)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            }
+        .sheet(item: $sharedItem) { shared in
+            ActivityView(item: shared.item)
         }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
@@ -241,14 +229,9 @@ struct NoteEditorView: View {
                 Label("PDF 내보내기", systemImage: "square.and.arrow.up")
             }
             Button {
-                sendToOneNote()
+                exportText()
             } label: {
-                Label("OneNote로 보내기", systemImage: "paperplane")
-            }
-            Button {
-                showOneNoteSettings = true
-            } label: {
-                Label("OneNote 연결 설정", systemImage: "link")
+                Label("텍스트 내보내기", systemImage: "text.alignleft")
             }
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button {
@@ -448,23 +431,15 @@ struct NoteEditorView: View {
         dictatedSegment = ""
     }
 
-    private func sendToOneNote() {
-        let client = OneNoteClient.shared
-        guard client.isReady else {
-            showOneNoteSettings = true
+    private func exportText() {
+        let body = page.plainText()
+        guard !body.isEmpty else {
+            audio.errorMessage = "내보낼 글자가 없습니다. 손으로 그린 필기와 사진은 텍스트로 내보낼 수 없습니다."
             return
         }
-        guard !sendingToOneNote, let content = page.makeOneNotePage() else { return }
-        sendingToOneNote = true
-        Task { @MainActor in
-            do {
-                try await client.createPage(content)
-                audio.errorMessage = "OneNote로 보냈습니다.\n위치: \(client.sectionName)"
-            } catch {
-                audio.errorMessage = "OneNote로 보내지 못했습니다.\n\(error.localizedDescription)"
-            }
-            sendingToOneNote = false
-        }
+        // 제목란에 적은 제목이 있으면 첫 줄에 붙인다. 없으면 본문 첫 줄이 곧 제목이라 중복하지 않는다.
+        let title = titleText.trimmingCharacters(in: .whitespaces)
+        sharedItem = SharedItem(item: title.isEmpty ? body : title + "\n\n" + body)
     }
 
     private func exportPDF() {
@@ -475,7 +450,7 @@ struct NoteEditorView: View {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(name + ".pdf")
         do {
             try data.write(to: url, options: .atomic)
-            sharedFile = SharedFile(url: url)
+            sharedItem = SharedItem(item: url)
         } catch {
             audio.errorMessage = "PDF를 만들지 못했습니다: \(error.localizedDescription)"
         }

@@ -13,17 +13,6 @@ final class PassthroughView: UIView {
     }
 }
 
-struct OneNoteFile {
-    let name: String
-    let type: String
-    let data: Data
-}
-
-struct OneNotePage {
-    let html: String
-    let files: [OneNoteFile]
-}
-
 /// 노트 한 장. 속지·사진·글자는 필기 레이어 아래에 깔리고, 그 위에 PencilKit으로 그린다.
 final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate {
     static let lineHeight: CGFloat = 30
@@ -273,54 +262,13 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
     }
 
-    /// OneNote 페이지로 보낼 내용. 글자는 OneNote에서 고칠 수 있는 텍스트로, 사진과 필기는 이미지로 같은 자리에 놓는다.
-    func makeOneNotePage() -> OneNotePage {
-        func escape(_ text: String) -> String {
-            text.replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-        }
-        func position(_ x: CGFloat, _ y: CGFloat) -> String {
-            "position:absolute;left:\(Int(x))px;top:\(Int(y))px"
-        }
-        var body = ""
-        var files: [OneNoteFile] = []
-
-        let folder = NoteStore.imageFolder(for: note.id)
-        for (index, item) in note.images.enumerated() {
-            guard let data = try? Data(contentsOf: folder.appendingPathComponent(item.fileName)) else { continue }
-            let name = "image\(index)"
-            files.append(OneNoteFile(name: name, type: "image/jpeg", data: data))
-            body += "<img src=\"name:\(name)\" width=\"\(Int(item.width))\" height=\"\(Int(item.height))\" "
-                + "style=\"\(position(item.x, item.y))\" />"
-        }
-
-        let drawing = canvas.drawing
-        let inkBounds = drawing.bounds
-        if !inkBounds.isNull, !inkBounds.isInfinite, !inkBounds.isEmpty {
-            var image: UIImage?
-            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                image = drawing.image(from: inkBounds, scale: 2)
-            }
-            if let data = image?.pngData() {
-                files.append(OneNoteFile(name: "ink", type: "image/png", data: data))
-                body += "<img src=\"name:ink\" width=\"\(Int(inkBounds.width))\" height=\"\(Int(inkBounds.height))\" "
-                    + "style=\"\(position(inkBounds.minX, inkBounds.minY))\" />"
-            }
-        }
-
-        for item in note.texts.sorted(by: { ($0.y, $0.x) < ($1.y, $1.x) }) {
-            let width = textViews[item.id]?.frame.width ?? 300
-            let paragraphs = item.text
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .map { $0.isEmpty ? "<br />" : "<p style=\"margin:0\">\(escape(String($0)))</p>" }
-                .joined()
-            body += "<div style=\"\(position(item.x, item.y));width:\(Int(width))px\">\(paragraphs)</div>"
-        }
-
-        let html = "<!DOCTYPE html><html><head><title>\(escape(note.title))</title></head>"
-            + "<body data-absolute-enabled=\"true\">\(body)</body></html>"
-        return OneNotePage(html: html, files: files)
+    /// 노트의 글자만 위에서 아래 순서로 모은 텍스트. 손필기와 사진은 들어가지 않는다.
+    func plainText() -> String {
+        note.texts
+            .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 
     func undo() { canvas.undoManager?.undo() }

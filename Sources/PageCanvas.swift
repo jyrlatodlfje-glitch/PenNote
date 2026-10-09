@@ -17,7 +17,7 @@ final class PageController: ObservableObject {
     func setTemplate(_ template: PaperTemplate) { view?.setTemplate(template) }
     func setName(_ name: String) { view?.setName(name) }
     func makePDF() -> Data? { view?.makePDF() }
-    func makeOneNotePage() -> OneNotePage? { view?.makeOneNotePage() }
+    func plainText() -> String { view?.plainText() ?? "" }
     func undo() { view?.undo() }
     func redo() { view?.redo() }
 }
@@ -46,16 +46,17 @@ struct PageCanvas: UIViewRepresentable {
     }
 }
 
-struct SharedFile: Identifiable {
+/// 공유 화면에 넘길 것: PDF 파일의 URL 또는 텍스트
+struct SharedItem: Identifiable {
     let id = UUID()
-    let url: URL
+    let item: Any
 }
 
 struct ActivityView: UIViewControllerRepresentable {
-    let url: URL
+    let item: Any
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        UIActivityViewController(activityItems: [item], applicationActivities: nil)
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}

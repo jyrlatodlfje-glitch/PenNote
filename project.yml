@@ -16,7 +16,7 @@ targets:
     info:
       path: Config/Info.plist
       properties:
-        CFBundleDisplayName: 펜노트
+        CFBundleDisplayName: PenNote
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: 회의 내용을 노트에 녹음하기 위해 마이크를 사용합니다.
         NSCameraUsageDescription: 사진을 찍어 노트에 넣기 위해 카메라를 사용합니다.

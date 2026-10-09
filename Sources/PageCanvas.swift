@@ -13,6 +13,7 @@ final class PageController: ObservableObject {
         view?.replaceBeforeCursor(old, with: new) ?? false
     }
     func addImage(_ image: UIImage) { view?.addImage(image) }
+    func addImages(_ images: [UIImage]) { view?.addImages(images) }
     func deleteSelected() { view?.deleteSelected() }
     func setTemplate(_ template: PaperTemplate) { view?.setTemplate(template) }
     func setName(_ name: String) { view?.setName(name) }
@@ -28,6 +29,8 @@ struct PageCanvas: UIViewRepresentable {
     let tool: PageTool
     let color: UIColor
     let useKeyboard: Bool
+    let straightenLines: Bool
+    let onTap: () -> Void
     let onChange: (Note) -> Void
 
     func makeUIView(context: Context) -> PageCanvasView {
@@ -41,6 +44,8 @@ struct PageCanvas: UIViewRepresentable {
 
     func updateUIView(_ view: PageCanvasView, context: Context) {
         view.onChange = onChange
+        view.onTap = onTap
+        view.straightenLines = straightenLines
         view.setTool(tool, color: color)
         view.useKeyboard = useKeyboard
     }

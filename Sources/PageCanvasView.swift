@@ -30,6 +30,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     var onChange: ((Note) -> Void)?
     var onSelectionChange: ((Bool) -> Void)?
+    /// 페이지를 눌렀을 때 (커서가 옮겨지기 전에) 알린다.
+    var onTap: (() -> Void)?
     var useKeyboard = false {
         didSet { if oldValue != useKeyboard { applyInputView() } }
     }
@@ -43,6 +45,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private var selectedID: UUID?
     private var currentTool: PageTool?
     private var currentColor: UIColor?
+    /// 펜·형광펜으로 그은 선이 거의 직선이면 반듯하게 고친다.
+    var straightenLines = true
+    private var knownStrokeCount = 0
     private var laidOutWidth: CGFloat = 0
     /// 확대하지 않았을 때의 종이 크기. 글자·사진·필기의 좌표는 모두 이 크기 기준이다.
     private var pageSize = CGSize.zero
@@ -84,7 +89,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.alwaysBounceVertical = true
-        canvas.minimumZoomScale = 0.5
+        canvas.alwaysBounceHorizontal = note.isWhiteboard == true
+        canvas.minimumZoomScale = note.isWhiteboard == true ? 0.2 : 0.5
         canvas.maximumZoomScale = 4
         canvas.delegate = self
         // 확대 배율을 transform으로 줄 때 왼쪽 위가 기준이 되게 한다.
@@ -92,6 +98,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         overlay.layer.anchorPoint = .zero
         if let drawing = try? PKDrawing(data: note.drawing) {
             canvas.drawing = drawing
+            knownStrokeCount = drawing.strokes.count
         }
         addSubview(canvas)
         canvas.insertSubview(underlay, at: 0)
@@ -140,6 +147,41 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         max(0, canvas.contentOffset.y / canvas.zoomScale)
     }
 
+    private var visibleLeft: CGFloat {
+        max(0, canvas.contentOffset.x / canvas.zoomScale)
+    }
+
+    /// 화이트보드: 쪽 구분 없이 사방으로 넓게 쓰는 판
+    private var isBoard: Bool { note.isWhiteboard == true }
+
+    /// 화이트보드의 처음 크기(한 변). 가운데에서 시작해 사방으로 쓰고, 오른쪽·아래로는 내용에 따라 더 늘어난다.
+    private static let boardSide: CGFloat = 10000
+    private var placedInitially = false
+
+    /// 새 글상자·사진을 놓을 가로 위치의 기준
+    private var insertLeft: CGFloat { isBoard ? visibleLeft : 0 }
+    /// 글자가 놓일 수 있는 가로 한계
+    private var layoutWidth: CGFloat { isBoard ? pageSize.width : bounds.width }
+
+    /// 글자·사진·필기를 모두 둘러싼 영역. 내용이 없으면 nil.
+    private func contentBounds() -> CGRect? {
+        var rect = CGRect.null
+        let inkBounds = canvas.drawing.bounds
+        if !inkBounds.isNull, !inkBounds.isInfinite, !inkBounds.isEmpty {
+            rect = rect.union(inkBounds)
+        }
+        for item in note.texts {
+            guard let view = textViews[item.id] else { continue }
+            view.layoutManager.ensureLayout(for: view.textContainer)
+            rect = rect.union(view.layoutManager.usedRect(for: view.textContainer)
+                .offsetBy(dx: view.frame.minX, dy: view.frame.minY))
+        }
+        for view in imageViews.values {
+            rect = rect.union(view.frame)
+        }
+        return rect.isNull ? nil : rect
+    }
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
@@ -152,6 +194,17 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             note.texts.forEach { layoutText($0.id) }
         }
         updateContentSize()
+        if isBoard, !placedInitially, bounds.width > 0 {
+            // 화이트보드는 내용이 있으면 그 자리를, 없으면 판의 가운데를 처음에 보여준다.
+            placedInitially = true
+            let origin: CGPoint
+            if let content = contentBounds() {
+                origin = CGPoint(x: max(0, content.minX - 24), y: max(0, content.minY - 24))
+            } else {
+                origin = CGPoint(x: (pageSize.width - bounds.width) / 2, y: (pageSize.height - bounds.height) / 2)
+            }
+            canvas.contentOffset = origin
+        }
         updateVisibleImages()
     }
 
@@ -214,11 +267,16 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         // 불러온 PDF는 원래 쪽 경계대로, 그 밖의 부분은 A4 비율로 나눈다.
         var pages: [CGRect] = []
         var top: CGFloat = 0
+        if isBoard {
+            // 화이트보드는 내용이 있는 부분만 한 장으로 내보낸다.
+            let content = contentBounds() ?? CGRect(x: 0, y: 0, width: width, height: pageHeight)
+            pages.append(content.insetBy(dx: -24, dy: -24))
+        }
         for pageEnd in note.pageBreaks ?? [] where pageEnd > top {
             pages.append(CGRect(x: 0, y: top, width: width, height: pageEnd - top))
             top = pageEnd
         }
-        while pages.isEmpty || bottom > top + 10 {
+        while pages.isEmpty || (!isBoard && bottom > top + 10) {
             pages.append(CGRect(x: 0, y: top, width: width, height: pageHeight))
             top += pageHeight
         }
@@ -227,18 +285,18 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             for visible in pages {
                 context.beginPage(withBounds: CGRect(origin: .zero, size: visible.size), pageInfo: [:])
                 context.cgContext.saveGState()
-                context.cgContext.translateBy(x: 0, y: -visible.minY)
+                context.cgContext.translateBy(x: -visible.minX, y: -visible.minY)
 
                 if note.template != .blank {
                     UIColor(white: 0.8, alpha: 1).setFill()
                     var y = ((visible.minY + 1) / line).rounded(.up) * line - 1
                     while y < visible.maxY {
-                        context.fill(CGRect(x: 0, y: y, width: width, height: 1))
+                        context.fill(CGRect(x: visible.minX, y: y, width: visible.width, height: 1))
                         y += line
                     }
                     if note.template == .grid {
-                        var x = line - 1
-                        while x < width {
+                        var x = ((visible.minX + 1) / line).rounded(.up) * line - 1
+                        while x < visible.maxX {
                             context.fill(CGRect(x: x, y: visible.minY, width: 1, height: visible.height))
                             x += line
                         }
@@ -282,7 +340,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func insertText(_ string: String) {
         if selectedTextView == nil {
-            createText(at: CGPoint(x: 16, y: visibleTop + Self.lineHeight))
+            createText(at: CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight))
         }
         guard let textView = selectedTextView else { return }
         textView.typingAttributes = Self.textAttributes
@@ -300,7 +358,12 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     /// 기존 내용과 겹치지 않게 페이지 맨 아래에 새 글상자로 넣는다.
     func appendBlock(_ string: String) {
         deselect()
-        createText(at: CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5))
+        if isBoard {
+            // 화이트보드에는 '맨 아래'가 없으므로 지금 보고 있는 곳에 넣는다.
+            createText(at: CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight * 2))
+        } else {
+            createText(at: CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5))
+        }
         insertText(string)
     }
 
@@ -338,6 +401,25 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     // MARK: - 사진
 
     func addImage(_ image: UIImage) {
+        addImages([image])
+    }
+
+    /// 여러 장을 위에서 아래로 이어서 넣는다 (문서 스캔).
+    func addImages(_ images: [UIImage]) {
+        var top = visibleTop + 20
+        var lastID: UUID?
+        for image in images {
+            guard let item = storeImage(image, top: top) else { continue }
+            top = item.y + item.height + 12
+            lastID = item.id
+        }
+        guard let lastID else { return }
+        updateVisibleImages()
+        select(lastID)
+        commit()
+    }
+
+    private func storeImage(_ image: UIImage, top: CGFloat) -> ImageItem? {
         let maxSide: CGFloat = 1600
         let scale = min(1, maxSide / max(image.size.width, image.size.height))
         let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -346,24 +428,22 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }
-        guard let data = resized.jpegData(compressionQuality: 0.8) else { return }
+        guard let data = resized.jpegData(compressionQuality: 0.8) else { return nil }
         let folder = NoteStore.imageFolder(for: note.id)
         let fileName = UUID().uuidString + ".jpg"
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try data.write(to: folder.appendingPathComponent(fileName))
         } catch {
-            return
+            return nil
         }
         let width = max(60, bounds.width - 40)
-        let item = ImageItem(x: 20, y: visibleTop + 20,
+        let item = ImageItem(x: insertLeft + 20, y: top,
                              width: width, height: width * size.height / size.width,
                              fileName: fileName)
         note.images.append(item)
         addImageView(for: item)
-        updateVisibleImages()
-        select(item.id)
-        commit()
+        return item
     }
 
     func deleteSelected() {
@@ -409,10 +489,60 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !lassoMoving else { return }
+        // 방금 그은 획이 거의 직선이면 반듯한 직선으로 바꾼다.
+        let strokes = canvasView.drawing.strokes
+        let isNewStroke = strokes.count == knownStrokeCount + 1
+        knownStrokeCount = strokes.count
+        if straightenLines, isNewStroke, currentTool == .pen || currentTool == .highlighter,
+           let last = strokes.last, let straight = Self.straightened(last) {
+            canvasView.drawing = PKDrawing(strokes: strokes.dropLast() + [straight])
+        }
         let data = canvasView.drawing.dataRepresentation()
         guard data != note.drawing else { return }
         note.drawing = data
         commit()
+    }
+
+    /// 획이 거의 직선이면 같은 굵기의 반듯한 직선 획을 돌려준다. 곡선이거나 짧은 획(글씨)은 nil.
+    private static func straightened(_ stroke: PKStroke) -> PKStroke? {
+        let points = stroke.path.map { $0.location.applying(stroke.transform) }
+        guard points.count >= 2, let start = points.first, var end = points.last else { return nil }
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let length = (dx * dx + dy * dy).squareRoot()
+        guard length >= 40 else { return nil }
+
+        // 시작점과 끝점을 이은 선에서 가장 멀리 벗어난 거리와, 실제로 그은 길이를 본다.
+        var deviation: CGFloat = 0
+        var travelled: CGFloat = 0
+        var previous = start
+        for point in points {
+            deviation = max(deviation, abs((point.x - start.x) * dy - (point.y - start.y) * dx) / length)
+            travelled += ((point.x - previous.x) * (point.x - previous.x)
+                + (point.y - previous.y) * (point.y - previous.y)).squareRoot()
+            previous = point
+        }
+        guard deviation <= max(4, length * 0.06), travelled <= length * 1.15 else { return nil }
+
+        // 가로·세로에 가까우면(약 6도 이내) 정확히 가로·세로로 맞춘다.
+        if abs(dy) < length * 0.1 {
+            end.y = start.y
+        } else if abs(dx) < length * 0.1 {
+            end.x = start.x
+        }
+
+        // 굵기와 진하기는 원래 획의 가운데 점을 따라 고르게 준다.
+        let sample = stroke.path[stroke.path.count / 2]
+        let steps = max(4, Int(length / 10))
+        let controlPoints = (0...steps).map { step -> PKStrokePoint in
+            let ratio = CGFloat(step) / CGFloat(steps)
+            let location = CGPoint(x: start.x + (end.x - start.x) * ratio, y: start.y + (end.y - start.y) * ratio)
+            return PKStrokePoint(location: location, timeOffset: TimeInterval(ratio), size: sample.size,
+                                 opacity: sample.opacity, force: sample.force,
+                                 azimuth: sample.azimuth, altitude: sample.altitude)
+        }
+        let path = PKStrokePath(controlPoints: controlPoints, creationDate: stroke.path.creationDate)
+        return PKStroke(ink: stroke.ink, path: path)
     }
 
     // MARK: - 선택·이동·크기
@@ -678,6 +808,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             clearLasso()
             return
         }
+        onTap?()
         let point = gesture.location(in: underlay)
         if let id = hitItem(at: point) {
             select(id)
@@ -788,7 +919,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private func createText(at point: CGPoint) {
         let line = Self.lineHeight
-        let x = min(max(12, point.x), max(12, bounds.width - 80))
+        let x = min(max(12, point.x), max(12, layoutWidth - 80))
         let y = note.template == .blank ? max(0, point.y - line / 2) : max(0, (point.y / line).rounded(.down) * line)
         let item = TextItem(x: x, y: y)
         note.texts.append(item)
@@ -800,7 +931,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private func storeFrame(_ id: UUID, _ frame: CGRect) {
         if let index = note.texts.firstIndex(where: { $0.id == id }) {
             let line = Self.lineHeight
-            note.texts[index].x = min(max(8, frame.minX), max(8, bounds.width - 60))
+            note.texts[index].x = min(max(8, frame.minX), max(8, layoutWidth - 60))
             note.texts[index].y = note.template == .blank ? frame.minY : max(0, (frame.minY / line).rounded() * line)
             layoutText(id)
         } else if let index = note.images.firstIndex(where: { $0.id == id }) {
@@ -845,8 +976,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     /// 쪽수가 많은 PDF에서도 메모리가 넘치지 않게, 화면 근처의 이미지만 올려 둔다.
     private func updateVisibleImages() {
         let visibleHeight = canvas.bounds.height / canvas.zoomScale
-        let near = CGRect(x: 0, y: visibleTop, width: bounds.width, height: visibleHeight)
-            .insetBy(dx: 0, dy: -visibleHeight)
+        let visibleWidth = canvas.bounds.width / canvas.zoomScale
+        let near = CGRect(x: visibleLeft, y: visibleTop, width: visibleWidth, height: visibleHeight)
+            .insetBy(dx: -visibleWidth, dy: -visibleHeight)
         let folder = NoteStore.imageFolder(for: note.id)
         for item in note.images {
             guard let view = imageViews[item.id] else { continue }
@@ -900,7 +1032,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     /// A4 한 장이 끝나는 자리마다 구분선을 긋는다. 불러온 PDF는 원래 쪽 테두리가 있어 긋지 않는다.
     private func updateSeparators() {
-        let pages = note.pageBreaks == nil ? Int((pageSize.height / pageHeight).rounded()) : 0
+        let pages = note.pageBreaks == nil && !isBoard ? Int((pageSize.height / pageHeight).rounded()) : 0
         let needed = max(0, pages - 1)
         while separators.count < needed {
             let line = UIView()
@@ -919,7 +1051,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private func layoutText(_ id: UUID) {
         guard bounds.width > 0, let textView = textViews[id],
               let item = note.texts.first(where: { $0.id == id }) else { return }
-        let width = max(60, bounds.width - item.x - 12)
+        // 화이트보드에서는 글상자가 끝없이 길어지지 않게 폭을 정해 둔다.
+        let width = isBoard ? 600 : max(60, bounds.width - item.x - 12)
         let fitted = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         textView.frame = CGRect(x: item.x, y: item.y, width: width, height: max(Self.lineHeight, fitted.height))
     }
@@ -962,6 +1095,14 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private func updateContentSize() {
         guard bounds.width > 0 else { return }
+        if isBoard {
+            let content = contentBounds() ?? .zero
+            pageSize = CGSize(width: max(Self.boardSide, content.maxX + 2000),
+                              height: max(Self.boardSide, content.maxY + 2000))
+            applyZoom()
+            updateSeparators()
+            return
+        }
         let bottom = contentBottom()
         let height: CGFloat
         if let lastBreak = note.pageBreaks?.last {

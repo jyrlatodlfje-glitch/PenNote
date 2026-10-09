@@ -7,16 +7,25 @@ struct StrokeSample {
     let t: Int
 }
 
-/// 글씨 쓰는 칸. 펜을 떼고 `idleDelay` 동안 쉬면 쓴 획을 넘겨주고 스스로 비운다.
-/// 오른쪽까지 쓴 뒤 왼쪽으로 돌아와 새로 쓰기 시작하면, 기다리지 않고 바로 넘기고 비운다.
+/// 글씨 쓰는 칸.
+/// 쓴 글씨는 바로 지우지 않고 칸에 남겨 두며, 잠깐 멈출 때마다 칸의 글씨 **전체**를 다시 읽게 한다.
+/// 그래서 "남대"까지 쓰고 멈췄다가 이어서 "문에서"를 써도 "남대문에서"로 한 번에 읽힌다.
+/// 칸을 비우고 다음 글로 넘어가는 때는 (1) 왼쪽으로 크게 돌아와 새로 쓰기 시작할 때, (2) 한동안 쓰지 않을 때다.
 final class InkPadView: UIView {
-    /// `(획, 줄바꿈)`: 줄바꿈은 칸을 다 채우고 왼쪽에서 이어 쓴 경우 true
-    var onIdle: (([[StrokeSample]], Bool) -> Void)?
-    var idleDelay: TimeInterval = 0.5
+    /// 칸에 있는 글씨 전체를 다시 읽어 달라는 요청. 획을 모두 지웠으면 빈 배열.
+    var onUpdate: (([[StrokeSample]]) -> Void)?
+    /// 칸을 비우고 다음 글로 넘어갔음. 왼쪽으로 돌아와 이어 쓴 경우 true.
+    var onCommit: ((Bool) -> Void)?
+    var readDelay: TimeInterval = 0.4
+    var settleDelay: TimeInterval = 2.0
 
     private var strokes: [[StrokeSample]] = []
     private var current: [StrokeSample] = []
-    private var idleTimer: Timer?
+    private var readTimer: Timer?
+    private var settleTimer: Timer?
+    private var needsRead = false
+    /// 글씨를 왼쪽으로 밀어낸 거리. 획의 x좌표는 이 값을 더한 "밀기 전 위치"로 저장한다.
+    private var offsetX: CGFloat = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -32,29 +41,37 @@ final class InkPadView: UIView {
     func undoLastStroke() {
         guard !strokes.isEmpty else { return }
         strokes.removeLast()
+        needsRead = true
         setNeedsDisplay()
-        scheduleIdle()
+        schedule()
     }
 
+    /// 아직 읽지 않은 글씨가 있으면 읽게 한 뒤 칸을 비운다. 키를 눌러 글을 확정할 때 쓴다.
+    func finish() {
+        readNow()
+        reset()
+    }
+
+    /// 칸을 그냥 비운다.
     func clear() {
-        idleTimer?.invalidate()
-        strokes = []
-        current = []
-        setNeedsDisplay()
+        reset()
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
-        idleTimer?.invalidate()
-        // 쓴 글씨의 오른쪽 끝에서 왼쪽으로 크게 돌아와 시작하면 새 글로 보고 앞의 것을 바로 넘긴다.
+        readTimer?.invalidate()
+        settleTimer?.invalidate()
+        // 쓴 글씨의 오른쪽 끝에서 왼쪽으로 크게 돌아와 시작하면 새 글로 보고 칸을 비운다.
         // 받침이나 점처럼 방금 쓴 글자로 돌아가는 획은 글자 한 개 폭(대략 글씨 높이) 안이므로 걸리지 않는다.
         let samples = strokes.flatMap { $0 }
         if let inkRight = samples.map({ $0.x }).max(),
            let inkTop = samples.map({ $0.y }).min(), let inkBottom = samples.map({ $0.y }).max() {
             let glyphSize = max(30, inkBottom - inkTop)
             let jumpBack = max(glyphSize * 1.8, bounds.width * 0.35)
-            if touch.location(in: self).x < inkRight - jumpBack {
-                flush(wrapped: true)
+            if touch.location(in: self).x < inkRight - offsetX - jumpBack {
+                readNow()
+                reset()
+                onCommit?(true)
             }
         }
         current = [sample(touch)]
@@ -78,31 +95,63 @@ final class InkPadView: UIView {
 
     private func sample(_ touch: UITouch) -> StrokeSample {
         let p = touch.location(in: self)
-        return StrokeSample(x: p.x, y: p.y, t: Int(touch.timestamp * 1000))
+        return StrokeSample(x: p.x + offsetX, y: p.y, t: Int(touch.timestamp * 1000))
     }
 
     private func finishStroke() {
         if !current.isEmpty {
             strokes.append(current)
             current = []
+            needsRead = true
         }
-        scheduleIdle()
+        // 오른쪽 끝에 거의 닿았으면 다음 획을 쓸 자리가 없으니 바로 민다.
+        makeRoom(ifBeyond: 0.85)
+        schedule()
     }
 
-    private func scheduleIdle() {
-        idleTimer?.invalidate()
-        guard !strokes.isEmpty else { return }
-        idleTimer = Timer.scheduledTimer(withTimeInterval: idleDelay, repeats: false) { [weak self] _ in
-            self?.flush(wrapped: false)
+    /// 글씨의 오른쪽 끝이 칸 폭의 `fraction`을 넘었으면, 글씨를 왼쪽으로 밀어 오른쪽에 쓸 자리를 만든다.
+    /// 밀려난 글씨는 보이지 않을 뿐 그대로 남아 있어서 함께 읽힌다.
+    private func makeRoom(ifBeyond fraction: CGFloat) {
+        guard let inkRight = strokes.flatMap({ $0 }).map({ $0.x }).max(),
+              inkRight - offsetX > bounds.width * fraction else { return }
+        UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) {
+            self.offsetX = inkRight - self.bounds.width * 0.3
+            self.setNeedsDisplay()
+            self.layer.displayIfNeeded()
         }
     }
 
-    private func flush(wrapped: Bool) {
-        guard !strokes.isEmpty else { return }
-        let finished = strokes
+    private func schedule() {
+        readTimer?.invalidate()
+        settleTimer?.invalidate()
+        readTimer = Timer.scheduledTimer(withTimeInterval: readDelay, repeats: false) { [weak self] _ in
+            self?.readNow()
+        }
+        settleTimer = Timer.scheduledTimer(withTimeInterval: settleDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.readNow()
+            self.reset()
+            self.onCommit?(false)
+        }
+    }
+
+    private func readNow() {
+        readTimer?.invalidate()
+        guard needsRead else { return }
+        needsRead = false
+        // 잠깐 멈춘 틈에는 조금 더 일찍 밀어 둔다. 글자를 쓰는 도중에 밀리는 일을 줄이기 위해서다.
+        makeRoom(ifBeyond: 0.6)
+        onUpdate?(strokes)
+    }
+
+    private func reset() {
+        readTimer?.invalidate()
+        settleTimer?.invalidate()
         strokes = []
+        current = []
+        needsRead = false
+        offsetX = 0
         setNeedsDisplay()
-        onIdle?(finished, wrapped)
     }
 
     override func draw(_ rect: CGRect) {
@@ -120,13 +169,18 @@ final class InkPadView: UIView {
         path.lineJoinStyle = .round
         for stroke in strokes + [current] {
             guard let first = stroke.first else { continue }
-            path.move(to: CGPoint(x: first.x, y: first.y))
+            path.move(to: CGPoint(x: first.x - offsetX, y: first.y))
             if stroke.count == 1 {
-                path.addLine(to: CGPoint(x: first.x + 0.5, y: first.y))
+                path.addLine(to: CGPoint(x: first.x - offsetX + 0.5, y: first.y))
             }
             for s in stroke.dropFirst() {
-                path.addLine(to: CGPoint(x: s.x, y: s.y))
+                path.addLine(to: CGPoint(x: s.x - offsetX, y: s.y))
             }
+        }
+        if offsetX > 0 {
+            // 왼쪽에 밀려난 글씨가 더 있다는 표시
+            UIColor.tertiaryLabel.setFill()
+            UIBezierPath(rect: CGRect(x: 0, y: 8, width: 3, height: bounds.height - 16)).fill()
         }
         UIColor.label.setStroke()
         path.stroke()
@@ -139,12 +193,14 @@ final class PadController: ObservableObject {
     var size: CGSize { view?.bounds.size ?? .zero }
 
     func undoLastStroke() { view?.undoLastStroke() }
+    func finish() { view?.finish() }
     func clear() { view?.clear() }
 }
 
 struct InkPad: UIViewRepresentable {
     let controller: PadController
-    let onIdle: ([[StrokeSample]], Bool) -> Void
+    let onUpdate: ([[StrokeSample]]) -> Void
+    let onCommit: (Bool) -> Void
 
     func makeUIView(context: Context) -> InkPadView {
         let view = InkPadView()
@@ -153,6 +209,7 @@ struct InkPad: UIViewRepresentable {
     }
 
     func updateUIView(_ view: InkPadView, context: Context) {
-        view.onIdle = onIdle
+        view.onUpdate = onUpdate
+        view.onCommit = onCommit
     }
 }

@@ -45,6 +45,8 @@ struct Note: Identifiable, Codable, Equatable {
     var folderID: UUID?
     /// 불러온 PDF의 쪽이 끝나는 세로 위치들. PDF로 내보낼 때 같은 자리에서 쪽을 나눈다.
     var pageBreaks: [CGFloat]?
+    /// 쪽 구분 없이 사방으로 넓게 쓰는 화이트보드인지
+    var isWhiteboard: Bool?
 
     var title: String {
         if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
@@ -93,9 +95,13 @@ final class NoteStore: ObservableObject {
         notes.filter { $0.folderID == folderID }
     }
 
-    func addNote(in folderID: UUID? = nil) -> Note {
+    func addNote(in folderID: UUID? = nil, whiteboard: Bool = false) -> Note {
         var note = Note()
         note.folderID = folderID
+        if whiteboard {
+            note.isWhiteboard = true
+            note.template = .blank
+        }
         notes.insert(note, at: 0)
         write(note)
         return note

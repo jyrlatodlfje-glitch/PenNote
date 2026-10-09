@@ -97,6 +97,15 @@ final class InkRecognizer: ObservableObject {
         runNextJob()
     }
 
+    /// 앞서 요청한 인식이 모두 끝난 뒤에 실행한다. 글자 넣기와 키 입력의 순서가 뒤바뀌지 않게 할 때 쓴다.
+    func enqueue(_ work: @escaping () -> Void) {
+        jobs.append { done in
+            work()
+            done()
+        }
+        runNextJob()
+    }
+
     private func runNextJob() {
         guard !jobRunning, !jobs.isEmpty else { return }
         jobRunning = true
@@ -125,9 +134,11 @@ final class InkRecognizer: ObservableObject {
         let ink = Ink(strokes: strokes.map { samples in
             Stroke(points: samples.map { StrokePoint(x: Float($0.x), y: Float($0.y), t: $0.t) })
         })
+        // 글씨 칸은 쓰는 대로 왼쪽으로 밀리므로, 글씨가 칸 폭보다 길 수 있다.
+        let inkRight = strokes.flatMap { $0 }.map { $0.x }.max() ?? 0
         let context = DigitalInkRecognitionContext(
             preContext: String(preceding.suffix(20)),
-            writingArea: WritingArea(width: Float(area.width), height: Float(area.height)))
+            writingArea: WritingArea(width: Float(max(area.width, inkRight + 20)), height: Float(area.height)))
         guard language == .auto else {
             run(language, ink: ink, context: context, completion: finish)
             return
@@ -136,7 +147,7 @@ final class InkRecognizer: ObservableObject {
         run(.korean, ink: ink, context: context) { [weak self] korean in
             guard let self else { return }
             self.run(.english, ink: ink, context: context) { english in
-                finish(Self.merge(korean: korean, english: english))
+                finish(Self.merge(korean: korean, english: english, preceding: preceding))
             }
         }
     }
@@ -202,10 +213,10 @@ final class InkRecognizer: ObservableObject {
     // MARK: - 언어 자동 판별
 
     /// 고른 언어의 후보를 앞에 두고, 다른 언어의 1순위를 바로 뒤에 두어 한 번 눌러 고칠 수 있게 한다.
-    private static func merge(korean: [String], english: [String]) -> [String] {
+    private static func merge(korean: [String], english: [String], preceding: String) -> [String] {
         guard let bestKorean = korean.first else { return english }
         guard let bestEnglish = english.first else { return korean }
-        let useEnglish = prefersEnglish(korean: bestKorean, english: bestEnglish)
+        let useEnglish = prefersEnglish(korean: bestKorean, english: bestEnglish, preceding: preceding)
         let primary = useEnglish ? english : korean
         let secondary = useEnglish ? korean : english
 
@@ -217,15 +228,22 @@ final class InkRecognizer: ObservableObject {
         return merged
     }
 
-    private static func prefersEnglish(korean: String, english: String) -> Bool {
-        let hasHangul = korean.unicodeScalars.contains { scalar in
-            (0xAC00...0xD7A3).contains(scalar.value)
-                || (0x3131...0x318E).contains(scalar.value)
-                || (0x1100...0x11FF).contains(scalar.value)
-        }
+    private static func isHangul(_ scalar: Unicode.Scalar) -> Bool {
+        (0xAC00...0xD7A3).contains(scalar.value)
+            || (0x3131...0x318E).contains(scalar.value)
+            || (0x1100...0x11FF).contains(scalar.value)
+    }
+
+    /// 한국어 쪽으로 기울여 판단한다. 한글 획은 영어 모델이 짧은 영어 단어로 잘못 읽는 일이 잦기 때문이다.
+    private static func prefersEnglish(korean: String, english: String, preceding: String) -> Bool {
         // 한국어 모델조차 한글을 하나도 읽지 못했으면 영어·숫자로 본다.
-        guard hasHangul else { return true }
-        // 한글로도 읽히지만, 영어로 읽은 결과가 모두 사전에 있는 단어면 영어로 본다.
+        guard korean.unicodeScalars.contains(where: isHangul) else { return true }
+        // 한글 바로 뒤에 띄어쓰기 없이 이어 쓰는 중이면 한국어다.
+        if let last = preceding.unicodeScalars.last, isHangul(last) {
+            return false
+        }
+        // 한글로도 읽히는 글씨는, 영어로 읽은 결과가 네 글자 이상이고 모두 사전에 있는 단어일 때만 영어로 본다.
+        guard english.filter({ $0.isLetter }).count >= 4 else { return false }
         return isEnglishWords(english)
     }
 

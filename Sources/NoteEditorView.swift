@@ -87,11 +87,17 @@ struct NoteEditorView: View {
     @State private var inkColor = InkColor.black
     @State private var useKeyboard = false
     @State private var lastInserted = ""
+    @AppStorage("straightenLines") private var straightenLines = true
     @State private var lastSuffix = ""
+    /// 지금 글씨 칸에 남아 있는 글씨로 노트에 넣은 글. 칸의 글씨를 다시 읽을 때마다 이 부분을 바꿔 쓴다.
+    @State private var sessionText = ""
     @State private var alternatives: [String] = []
     @State private var showRecordings = false
     @State private var showCamera = false
     @State private var showPhotoLibrary = false
+    @State private var showScanner = false
+    @State private var bookMode = false
+    @State private var fixingScan = false
     @State private var photoItem: PhotosPickerItem?
     @State private var sharedItem: SharedItem?
     @State private var titleText: String
@@ -128,17 +134,19 @@ struct NoteEditorView: View {
             let layout = landscape ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
             layout {
                 PageCanvas(initialNote: note, controller: page, tool: tool, color: inkColor.uiColor,
-                           useKeyboard: useKeyboard) { changed in
+                           useKeyboard: useKeyboard, straightenLines: straightenLines,
+                           onTap: dropSession) { changed in
                     note = changed
                     store.update(changed)
                 }
-                .frame(width: landscape ? pageWidth : nil)
+                // 화이트보드는 폭이 정해져 있지 않으므로 가로에서도 남는 자리를 다 쓴다.
+                .frame(width: landscape && note.isWhiteboard != true ? pageWidth : nil)
 
-                if tool == .select && !useKeyboard && !titleFocused {
+                if padVisible {
                     Divider()
                     VStack(spacing: 0) {
                         statusBar
-                        InkPad(controller: pad, onIdle: recognize)
+                        InkPad(controller: pad, onUpdate: padUpdated, onCommit: padCommitted)
                             .frame(height: landscape ? nil : 200)
                         keyRow
                     }
@@ -191,6 +199,30 @@ struct NoteEditorView: View {
             }
             .ignoresSafeArea()
         }
+        .fullScreenCover(isPresented: $showScanner) {
+            DocumentScanner { pages in
+                guard bookMode else {
+                    page.addImages(pages)
+                    return
+                }
+                fixingScan = true
+                Task.detached {
+                    let fixed = pages.flatMap { BookScan.process($0) }
+                    await MainActor.run {
+                        fixingScan = false
+                        page.addImages(fixed)
+                    }
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .overlay {
+            if fixingScan {
+                ProgressView("스캔을 보정하는 중")
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
         .photosPicker(isPresented: $showPhotoLibrary, selection: $photoItem, matching: .images)
         .onChange(of: photoItem) { item in
             guard let item else { return }
@@ -210,6 +242,12 @@ struct NoteEditorView: View {
         }
         .onDisappear {
             dictation.stop()
+        }
+        .onChange(of: padVisible) { _ in
+            // 글씨 칸이 사라지면 칸에 있던 글씨도 없어지므로, 이어 쓰던 글을 확정한다.
+            recognizer.enqueue {
+                sessionText = ""
+            }
         }
         .alert("알림", isPresented: Binding(
             get: { audio.errorMessage != nil },
@@ -247,6 +285,22 @@ struct NoteEditorView: View {
             } label: {
                 Label("앨범에서 사진 넣기", systemImage: "photo")
             }
+            if DocumentScanner.isSupported {
+                Button {
+                    tool = .select
+                    bookMode = false
+                    showScanner = true
+                } label: {
+                    Label("문서 스캔해서 넣기", systemImage: "doc.viewfinder")
+                }
+                Button {
+                    tool = .select
+                    bookMode = true
+                    showScanner = true
+                } label: {
+                    Label("책 스캔해서 넣기 (곡면·손가락 보정)", systemImage: "book")
+                }
+            }
             Picker("속지", selection: Binding(
                 get: { note.template },
                 set: { page.setTemplate($0) }
@@ -255,6 +309,7 @@ struct NoteEditorView: View {
                     Text(template.label).tag(template)
                 }
             }
+            Toggle("직선 반듯하게 고치기", isOn: $straightenLines)
             Button {
                 useKeyboard.toggle()
             } label: {
@@ -366,8 +421,8 @@ struct NoteEditorView: View {
         HStack(spacing: 0) {
             key(text: recognizer.language.label) {
                 stopDictation()
+                endSession()
                 recognizer.language = recognizer.language.next
-                pad.clear()
             }
             Button(action: toggleDictation) {
                 Image(systemName: dictation.isListening ? "stop.fill" : "mic.fill")
@@ -378,8 +433,7 @@ struct NoteEditorView: View {
             key(icon: "scribble") { pad.undoLastStroke() }
             key(icon: "space") { type(" ") }
             RepeatKey(icon: "delete.left") {
-                page.backspace()
-                alternatives = []
+                backspace()
             }
             key(icon: "return") { type("\n") }
         }
@@ -410,6 +464,7 @@ struct NoteEditorView: View {
             audio.errorMessage = "녹음 중에는 음성 입력을 함께 쓸 수 없습니다."
             return
         }
+        endSession()
         alternatives = []
         dictatedSegment = ""
         dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR") { text, segmentEnded in
@@ -466,23 +521,87 @@ struct NoteEditorView: View {
         }
     }
 
-    private func type(_ string: String) {
-        page.insert(string)
-        alternatives = []
+    private var padVisible: Bool {
+        tool == .select && !useKeyboard && !titleFocused
     }
 
-    private func recognize(_ strokes: [[StrokeSample]], wrapped: Bool) {
-        recognizer.recognize(strokes, area: pad.size, preceding: page.textBeforeCursor()) { texts in
+    /// 페이지를 눌러 커서를 옮길 때: 칸의 글씨를 버리고 지금까지 넣은 글을 확정한다.
+    private func dropSession() {
+        pad.clear()
+        recognizer.enqueue {
+            sessionText = ""
+        }
+    }
+
+    /// 글씨 칸의 글씨를 확정하고 칸을 비운다. 키 입력처럼 글을 이어 붙이는 동작 앞에서 부른다.
+    /// 뒤따르는 동작은 `recognizer.enqueue`로 넣어야, 아직 끝나지 않은 인식 결과보다 먼저 실행되지 않는다.
+    private func endSession() {
+        pad.finish()
+        recognizer.enqueue {
+            sessionText = ""
+        }
+    }
+
+    private func type(_ string: String) {
+        endSession()
+        recognizer.enqueue {
+            page.insert(string)
+            alternatives = []
+        }
+    }
+
+    private func backspace() {
+        endSession()
+        recognizer.enqueue {
+            page.backspace()
+            alternatives = []
+        }
+    }
+
+    /// 글씨 칸의 글씨 전체를 다시 읽어, 이 칸으로 넣었던 글을 새 결과로 바꿔 쓴다.
+    private func padUpdated(_ strokes: [[StrokeSample]]) {
+        guard !strokes.isEmpty else {
+            recognizer.enqueue {
+                if !sessionText.isEmpty {
+                    _ = page.replaceBeforeCursor(sessionText, with: "")
+                }
+                sessionText = ""
+                alternatives = []
+            }
+            return
+        }
+        var preceding = page.textBeforeCursor()
+        if preceding.hasSuffix(sessionText) {
+            preceding.removeLast(sessionText.count)
+        }
+        recognizer.recognize(strokes, area: pad.size, preceding: preceding) { texts in
             guard let best = texts.first else { return }
-            // 칸을 다 채우고 이어 쓴 경우에는 다음 글과 붙지 않게 한 칸 띄운다.
-            lastSuffix = wrapped ? " " : ""
-            page.insert(best + lastSuffix)
+            if !page.replaceBeforeCursor(sessionText, with: best) {
+                page.insert(best)
+            }
+            sessionText = best
             lastInserted = best
+            lastSuffix = ""
             alternatives = Array(texts.dropFirst().prefix(5))
         }
     }
 
+    /// 글씨 칸이 비워지고 다음 글로 넘어갔다.
+    private func padCommitted(wrapped: Bool) {
+        recognizer.enqueue {
+            // 칸을 다 채우고 왼쪽에서 이어 쓴 경우에는 다음 글과 붙지 않게 한 칸 띄운다.
+            if wrapped, !sessionText.isEmpty {
+                page.insert(" ")
+                lastSuffix = " "
+            }
+            sessionText = ""
+        }
+    }
+
     private func choose(_ candidate: String) {
+        // 고른 후보가 다음 인식 결과로 덮이지 않도록 글씨 칸을 비우고 확정한다.
+        pad.clear()
+        sessionText = ""
         guard page.replaceBeforeCursor(lastInserted + lastSuffix, with: candidate + lastSuffix) else {
             alternatives = []
             return

@@ -37,6 +37,9 @@ struct NoteBrowser: View {
     @State private var showPrompt = false
     @State private var promptText = ""
     @State private var showPDFImporter = false
+    @State private var showScanner = false
+    /// 책 스캔: 두 쪽 나누기, 손가락 지우기, 휜 글줄 펴기를 거친다.
+    @State private var bookMode = false
     @State private var importing = false
     @State private var importFailed = false
 
@@ -95,22 +98,51 @@ struct NoteBrowser: View {
                         Image(systemName: "folder.badge.plus")
                     }
                 }
-                Button {
-                    showPDFImporter = true
-                } label: {
-                    Image(systemName: "doc.badge.plus")
-                }
-                .disabled(importing)
-                Button {
-                    path.append(.note(store.addNote(in: folderID).id))
+                Menu {
+                    Button {
+                        path.append(.note(store.addNote(in: folderID).id))
+                    } label: {
+                        Label("노트", systemImage: "note.text")
+                    }
+                    Button {
+                        path.append(.note(store.addNote(in: folderID, whiteboard: true).id))
+                    } label: {
+                        Label("화이트보드", systemImage: "rectangle.dashed")
+                    }
+                    Button {
+                        showPDFImporter = true
+                    } label: {
+                        Label("PDF 불러오기", systemImage: "doc")
+                    }
+                    if DocumentScanner.isSupported {
+                        Button {
+                            bookMode = false
+                            showScanner = true
+                        } label: {
+                            Label("문서 스캔", systemImage: "doc.viewfinder")
+                        }
+                        Button {
+                            bookMode = true
+                            showScanner = true
+                        } label: {
+                            Label("책 스캔 (곡면·손가락 보정)", systemImage: "book")
+                        }
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
+                .disabled(importing)
             }
+        }
+        .fullScreenCover(isPresented: $showScanner) {
+            DocumentScanner { pages in
+                importScan(pages)
+            }
+            .ignoresSafeArea()
         }
         .overlay {
             if importing {
-                ProgressView("PDF를 불러오는 중")
+                ProgressView("불러오는 중")
                     .padding(24)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
@@ -119,7 +151,7 @@ struct NoteBrowser: View {
             guard case .success(let url) = result else { return }
             importPDF(url)
         }
-        .alert("PDF를 불러오지 못했습니다", isPresented: $importFailed) {
+        .alert("불러오지 못했습니다", isPresented: $importFailed) {
             Button("확인", role: .cancel) {}
         }
         .alert(prompt?.title ?? "", isPresented: $showPrompt) {
@@ -156,12 +188,16 @@ struct NoteBrowser: View {
 
     private func noteRow(_ note: Note) -> some View {
         NavigationLink(value: Route.note(note.id)) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(note.title)
-                    .lineLimit(1)
-                Text(note.modified, style: .date)
-                    .font(.caption)
+            HStack(spacing: 12) {
+                Image(systemName: note.isWhiteboard == true ? "rectangle.dashed" : "note.text")
                     .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(note.title)
+                        .lineLimit(1)
+                    Text(note.modified, style: .date)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .draggable(note.id.uuidString)
@@ -201,6 +237,27 @@ struct NoteBrowser: View {
         let folderID = folderID
         Task.detached {
             let note = PDFImporter.makeNote(from: url, pageWidth: pageWidth, folderID: folderID)
+            await MainActor.run {
+                importing = false
+                if let note {
+                    store.add(note)
+                    path.append(.note(note.id))
+                } else {
+                    importFailed = true
+                }
+            }
+        }
+    }
+
+    private func importScan(_ pages: [UIImage]) {
+        guard !pages.isEmpty else { return }
+        importing = true
+        let pageWidth = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        let folderID = folderID
+        let bookMode = bookMode
+        Task.detached {
+            let fixed = bookMode ? pages.flatMap { BookScan.process($0) } : pages
+            let note = ScanImporter.makeNote(from: fixed, pageWidth: pageWidth, folderID: folderID)
             await MainActor.run {
                 importing = false
                 if let note {

@@ -18,7 +18,7 @@ struct NoteListView: View {
                         }
                     }
                 }
-                .onDelete { store.notes.remove(atOffsets: $0) }
+                .onDelete(perform: store.delete)
             }
             .overlay {
                 if store.notes.isEmpty {
@@ -37,8 +37,8 @@ struct NoteListView: View {
                 }
             }
             .navigationDestination(for: UUID.self) { id in
-                if let index = store.notes.firstIndex(where: { $0.id == id }) {
-                    NoteEditorView(note: $store.notes[index])
+                if let note = store.notes.first(where: { $0.id == id }) {
+                    NoteEditorView(note: note)
                 }
             }
         }

@@ -37,8 +37,13 @@ struct Note: Identifiable, Codable, Equatable {
     var drawing = Data()
     var texts: [TextItem] = []
     var images: [ImageItem] = []
+    /// 사용자가 직접 정한 제목. 없으면 첫 줄을 제목으로 쓴다.
+    var name: String?
 
     var title: String {
+        if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
+            return name
+        }
         let lines = texts
             .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
             .flatMap { $0.text.split(separator: "\n") }
@@ -78,6 +83,19 @@ final class NoteStore: ObservableObject {
         guard let index = notes.firstIndex(where: { $0.id == note.id }), notes[index] != note else { return }
         notes[index] = note
         write(note)
+    }
+
+    func rename(_ id: UUID, to name: String) {
+        guard var note = notes.first(where: { $0.id == id }) else { return }
+        note.name = name
+        note.modified = Date()
+        update(note)
+    }
+
+    func delete(_ id: UUID) {
+        if let index = notes.firstIndex(where: { $0.id == id }) {
+            delete(at: IndexSet(integer: index))
+        }
     }
 
     func delete(at offsets: IndexSet) {

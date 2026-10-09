@@ -3,6 +3,8 @@ import SwiftUI
 struct NoteListView: View {
     @EnvironmentObject private var store: NoteStore
     @State private var path: [UUID] = []
+    @State private var renaming: Note?
+    @State private var newName = ""
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -17,8 +19,40 @@ struct NoteListView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                    .contextMenu {
+                        Button {
+                            newName = note.title
+                            renaming = note
+                        } label: {
+                            Label("제목 수정", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            store.delete(note.id)
+                        } label: {
+                            Label("삭제", systemImage: "trash")
+                        }
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button("제목 수정") {
+                            newName = note.title
+                            renaming = note
+                        }
+                        .tint(.blue)
+                    }
                 }
-                .onDelete(perform: store.delete)
+                .onDelete { store.delete(at: $0) }
+            }
+            .alert("노트 제목", isPresented: Binding(
+                get: { renaming != nil },
+                set: { if !$0 { renaming = nil } }
+            )) {
+                TextField("제목", text: $newName)
+                Button("저장") {
+                    if let note = renaming {
+                        store.rename(note.id, to: newName)
+                    }
+                }
+                Button("취소", role: .cancel) {}
             }
             .overlay {
                 if store.notes.isEmpty {

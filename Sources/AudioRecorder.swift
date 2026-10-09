@@ -95,6 +95,26 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
         reload()
     }
 
+    /// 파일 앱에서 고른 녹음 파일을 이 노트로 복사한다.
+    func importFile(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var target = folder.appendingPathComponent(url.lastPathComponent)
+            if FileManager.default.fileExists(atPath: target.path) {
+                let name = url.deletingPathExtension().lastPathComponent + " " + UUID().uuidString.prefix(4)
+                target = folder.appendingPathComponent(name).appendingPathExtension(url.pathExtension)
+            }
+            try FileManager.default.copyItem(at: url, to: target)
+            reload()
+        } catch {
+            errorMessage = "파일을 불러오지 못했습니다: \(error.localizedDescription)"
+        }
+    }
+
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         playing = nil
     }
@@ -162,7 +182,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func reload() {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         recordings = files
-            .filter { $0.pathExtension == "m4a" }
+            .filter { ["m4a", "mp3", "wav", "aac", "caf", "mp4"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 }

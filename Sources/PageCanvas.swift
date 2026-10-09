@@ -6,6 +6,7 @@ final class PageController: ObservableObject {
     fileprivate weak var view: PageCanvasView?
 
     func insert(_ string: String) { view?.insertText(string) }
+    func appendBlock(_ string: String) { view?.appendBlock(string) }
     func backspace() { view?.backspace() }
     func replaceBeforeCursor(_ old: String, with new: String) -> Bool {
         view?.replaceBeforeCursor(old, with: new) ?? false
@@ -13,6 +14,8 @@ final class PageController: ObservableObject {
     func addImage(_ image: UIImage) { view?.addImage(image) }
     func deleteSelected() { view?.deleteSelected() }
     func setTemplate(_ template: PaperTemplate) { view?.setTemplate(template) }
+    func setName(_ name: String) { view?.setName(name) }
+    func makePDF() -> Data? { view?.makePDF() }
     func undo() { view?.undo() }
     func redo() { view?.redo() }
 }
@@ -39,6 +42,21 @@ struct PageCanvas: UIViewRepresentable {
         view.setTool(tool, color: color)
         view.useKeyboard = useKeyboard
     }
+}
+
+struct SharedFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct ActivityView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 struct CameraPicker: UIViewControllerRepresentable {

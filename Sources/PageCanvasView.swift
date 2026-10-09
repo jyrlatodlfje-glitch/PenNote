@@ -131,6 +131,65 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         commit()
     }
 
+    func setName(_ name: String) {
+        guard note.name != name else { return }
+        note.name = name
+        commit()
+    }
+
+    /// 페이지를 A4 비율로 나눠 PDF로 만든다. 글자는 텍스트로, 필기와 사진은 이미지로 들어간다.
+    func makePDF() -> Data {
+        let line = Self.lineHeight
+        let width = max(bounds.width, 100)
+        // 줄 중간에서 쪽이 나뉘지 않게 쪽 높이를 줄 간격의 배수로 맞춘다.
+        let pageHeight = (width * 297 / 210 / line).rounded(.down) * line
+        let pageCount = max(1, Int((contentBottom() / pageHeight).rounded(.up)))
+        let pageRect = CGRect(x: 0, y: 0, width: width, height: pageHeight)
+        let drawing = canvas.drawing
+
+        return UIGraphicsPDFRenderer(bounds: pageRect).pdfData { context in
+            for page in 0..<pageCount {
+                context.beginPage()
+                let visible = pageRect.offsetBy(dx: 0, dy: CGFloat(page) * pageHeight)
+                context.cgContext.saveGState()
+                context.cgContext.translateBy(x: 0, y: -visible.minY)
+
+                if note.template != .blank {
+                    UIColor(white: 0.8, alpha: 1).setFill()
+                    var y = visible.minY + line - 1
+                    while y < visible.maxY {
+                        context.fill(CGRect(x: 0, y: y, width: width, height: 1))
+                        y += line
+                    }
+                    if note.template == .grid {
+                        var x = line - 1
+                        while x < width {
+                            context.fill(CGRect(x: x, y: visible.minY, width: 1, height: pageHeight))
+                            x += line
+                        }
+                    }
+                }
+                for item in note.images {
+                    if let view = imageViews[item.id], view.frame.intersects(visible) {
+                        view.image?.draw(in: view.frame)
+                    }
+                }
+                for item in note.texts {
+                    if let view = textViews[item.id], view.frame.intersects(visible) {
+                        view.attributedText.draw(in: view.frame)
+                    }
+                }
+                var ink: UIImage?
+                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                    ink = drawing.image(from: visible, scale: 2)
+                }
+                ink?.draw(in: visible)
+
+                context.cgContext.restoreGState()
+            }
+        }
+    }
+
     func undo() { canvas.undoManager?.undo() }
     func redo() { canvas.undoManager?.redo() }
 
@@ -144,6 +203,13 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         textView.typingAttributes = Self.textAttributes
         textView.insertText(string)
         textViewDidChange(textView)
+    }
+
+    /// 기존 내용과 겹치지 않게 페이지 맨 아래에 새 글상자로 넣는다.
+    func appendBlock(_ string: String) {
+        deselect()
+        createText(at: CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5))
+        insertText(string)
     }
 
     func backspace() {
@@ -455,6 +521,17 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private func updateContentSize() {
         guard bounds.width > 0 else { return }
+        // 속지 줄이 끊기지 않게 줄 간격의 배수로 맞춘다.
+        let line = Self.lineHeight
+        let height = (max(bounds.height, contentBottom() + 1200) / line).rounded(.up) * line
+        let size = CGSize(width: bounds.width, height: height)
+        if canvas.contentSize != size {
+            canvas.contentSize = size
+        }
+        underlay.frame = CGRect(origin: .zero, size: size)
+    }
+
+    private func contentBottom() -> CGFloat {
         var bottom: CGFloat = 0
         let inkBounds = canvas.drawing.bounds
         if !inkBounds.isNull, !inkBounds.isInfinite {
@@ -466,14 +543,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         for view in imageViews.values {
             bottom = max(bottom, view.frame.maxY)
         }
-        // 속지 줄이 끊기지 않게 줄 간격의 배수로 맞춘다.
-        let line = Self.lineHeight
-        let height = (max(bounds.height, bottom + 1200) / line).rounded(.up) * line
-        let size = CGSize(width: bounds.width, height: height)
-        if canvas.contentSize != size {
-            canvas.contentSize = size
-        }
-        underlay.frame = CGRect(origin: .zero, size: size)
+        return bottom
     }
 
     private func commit() {

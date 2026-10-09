@@ -41,9 +41,13 @@ struct NoteEditorView: View {
     @State private var showCamera = false
     @State private var showPhotoLibrary = false
     @State private var photoItem: PhotosPickerItem?
+    @State private var sharedFile: SharedFile?
+    @State private var titleText: String
+    @FocusState private var titleFocused: Bool
 
     init(note: Note) {
         _note = State(initialValue: note)
+        _titleText = State(initialValue: note.name ?? "")
         _audio = StateObject(wrappedValue: AudioRecorder(noteID: note.id))
     }
 
@@ -52,6 +56,13 @@ struct NoteEditorView: View {
             if audio.isRecording {
                 recordingBanner
             }
+            TextField("제목", text: $titleText)
+                .font(.title3.weight(.semibold))
+                .submitLabel(.done)
+                .focused($titleFocused)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            Divider()
             toolRow
             Divider()
             PageCanvas(initialNote: note, controller: page, tool: tool, color: inkColor.uiColor,
@@ -60,7 +71,7 @@ struct NoteEditorView: View {
                 store.update(changed)
             }
 
-            if tool == .select && !useKeyboard {
+            if tool == .select && !useKeyboard && !titleFocused {
                 Divider()
                 statusBar
                 InkPad(controller: pad, onIdle: recognize)
@@ -68,8 +79,19 @@ struct NoteEditorView: View {
                 keyRow
             }
         }
-        .navigationTitle(note.title)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: titleText) { name in
+            page.setName(name)
+        }
+        .onAppear {
+            // 새 노트는 제목부터 적도록 제목란에 커서를 둔다.
+            if note.name == nil && note.texts.isEmpty && note.drawing.isEmpty && note.images.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    titleFocused = true
+                }
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button {
@@ -87,7 +109,13 @@ struct NoteEditorView: View {
             }
         }
         .sheet(isPresented: $showRecordings) {
-            RecordingsView(audio: audio)
+            RecordingsView(audio: audio) { transcript in
+                tool = .select
+                page.appendBlock(transcript)
+            }
+        }
+        .sheet(item: $sharedFile) { file in
+            ActivityView(url: file.url)
         }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
@@ -118,6 +146,11 @@ struct NoteEditorView: View {
 
     private var moreMenu: some View {
         Menu {
+            Button {
+                exportPDF()
+            } label: {
+                Label("PDF로 내보내기 (OneNote 등)", systemImage: "square.and.arrow.up")
+            }
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button {
                     tool = .select
@@ -271,6 +304,20 @@ struct NoteEditorView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
+        }
+    }
+
+    private func exportPDF() {
+        guard let data = page.makePDF() else { return }
+        let name = note.title
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
+            .joined(separator: " ")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name + ".pdf")
+        do {
+            try data.write(to: url, options: .atomic)
+            sharedFile = SharedFile(url: url)
+        } catch {
+            audio.errorMessage = "PDF를 만들지 못했습니다: \(error.localizedDescription)"
         }
     }
 

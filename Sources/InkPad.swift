@@ -12,7 +12,7 @@ struct StrokeSample {
 final class InkPadView: UIView {
     /// `(획, 줄바꿈)`: 줄바꿈은 칸을 다 채우고 왼쪽에서 이어 쓴 경우 true
     var onIdle: (([[StrokeSample]], Bool) -> Void)?
-    var idleDelay: TimeInterval = 0.8
+    var idleDelay: TimeInterval = 0.5
 
     private var strokes: [[StrokeSample]] = []
     private var current: [StrokeSample] = []
@@ -46,10 +46,16 @@ final class InkPadView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
         idleTimer?.invalidate()
-        // 한 글자 안에서 왼쪽으로 조금 돌아가는 것과 구분되도록, 칸 폭의 절반 가까이 돌아왔을 때만 줄바꿈으로 본다.
-        if let inkRight = strokes.flatMap({ $0 }).map({ $0.x }).max(),
-           touch.location(in: self).x < inkRight - bounds.width * 0.45 {
-            flush(wrapped: true)
+        // 쓴 글씨의 오른쪽 끝에서 왼쪽으로 크게 돌아와 시작하면 새 글로 보고 앞의 것을 바로 넘긴다.
+        // 받침이나 점처럼 방금 쓴 글자로 돌아가는 획은 글자 한 개 폭(대략 글씨 높이) 안이므로 걸리지 않는다.
+        let samples = strokes.flatMap { $0 }
+        if let inkRight = samples.map({ $0.x }).max(),
+           let inkTop = samples.map({ $0.y }).min(), let inkBottom = samples.map({ $0.y }).max() {
+            let glyphSize = max(30, inkBottom - inkTop)
+            let jumpBack = max(glyphSize * 1.8, bounds.width * 0.35)
+            if touch.location(in: self).x < inkRight - jumpBack {
+                flush(wrapped: true)
+            }
         }
         current = [sample(touch)]
         setNeedsDisplay()

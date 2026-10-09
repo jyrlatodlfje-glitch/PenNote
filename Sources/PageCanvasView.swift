@@ -67,7 +67,11 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private var lassoGhost: UIImageView?
     private var lassoPicked: [PKStroke] = []
     private var lassoRest: [PKStroke] = []
-    private var hasLassoSelection: Bool { !lassoItems.isEmpty || !lassoStrokes.isEmpty }
+    /// 글상자의 일부 글자만 고른 경우: 글상자 ID → 고른 글자 범위들. 옮기기 시작할 때 떼어낸다.
+    private var lassoPartial: [UUID: [NSRange]] = [:]
+    private var hasLassoSelection: Bool {
+        !lassoItems.isEmpty || !lassoStrokes.isEmpty || !lassoPartial.isEmpty
+    }
 
     init(note: Note) {
         self.note = note
@@ -364,6 +368,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func deleteSelected() {
         if hasLassoSelection {
+            splitPartialSelections()
             lassoItems.forEach(removeItem)
             if !lassoStrokes.isEmpty {
                 var strokes = canvas.drawing.strokes
@@ -459,21 +464,26 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private func finishLassoLoop() {
         guard let path = lassoPath else { return }
         path.close()
-        let loopCenter = CGPoint(x: path.bounds.midX, y: path.bounds.midY)
 
-        // 글상자는 통째로 고른다: 글자 중심이 올가미 안이거나, 올가미가 글상자 안에 그려졌을 때.
-        let texts = note.texts.filter { item in
-            guard let view = textViews[item.id] else { return false }
-            view.layoutManager.ensureLayout(for: view.textContainer)
-            let rect = view.layoutManager.usedRect(for: view.textContainer)
-                .offsetBy(dx: view.frame.minX, dy: view.frame.minY)
-            return path.contains(CGPoint(x: rect.midX, y: rect.midY)) || rect.contains(loopCenter)
+        // 글자는 낱자 단위로 고른다. 글상자의 글자가 모두 들어오면 글상자째, 일부만 들어오면 그 글자만.
+        var wholeTexts: [UUID] = []
+        lassoPartial = [:]
+        for item in note.texts {
+            guard let view = textViews[item.id] else { continue }
+            let picked = characters(in: view, inside: path)
+            if picked.selected.isEmpty {
+                continue
+            } else if picked.selected.count == picked.total {
+                wholeTexts.append(item.id)
+            } else {
+                lassoPartial[item.id] = picked.selected
+            }
         }
         let images = note.images.filter { item in
             guard item.locked != true, let frame = imageViews[item.id]?.frame else { return false }
             return path.contains(CGPoint(x: frame.midX, y: frame.midY))
         }
-        lassoItems = texts.map { $0.id } + images.map { $0.id }
+        lassoItems = wholeTexts + images.map { $0.id }
         lassoStrokes = canvas.drawing.strokes.enumerated().compactMap { index, stroke in
             var inside = 0
             var total = 0
@@ -496,6 +506,83 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
     }
 
+    /// 글상자의 글자(공백 제외) 가운데 중심이 올가미 안에 있는 것들의 범위와, 전체 글자 수.
+    private func characters(in view: UITextView, inside path: UIBezierPath) -> (selected: [NSRange], total: Int) {
+        let layout = view.layoutManager
+        layout.ensureLayout(for: view.textContainer)
+        let text = view.text as NSString
+        var selected: [NSRange] = []
+        var total = 0
+        text.enumerateSubstrings(in: NSRange(location: 0, length: text.length),
+                                 options: .byComposedCharacterSequences) { substring, range, _, _ in
+            guard let substring, !substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            total += 1
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let rect = layout.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
+                .offsetBy(dx: view.frame.minX, dy: view.frame.minY)
+            if path.contains(CGPoint(x: rect.midX, y: rect.midY)) {
+                selected.append(range)
+            }
+        }
+        return (selected, total)
+    }
+
+    /// 일부 글자만 고른 글상자에서 그 글자를 떼어내 새 글상자로 만든다. 떼어낸 글상자는 올가미 선택에 들어간다.
+    private func splitPartialSelections() {
+        for (id, ranges) in lassoPartial {
+            guard let view = textViews[id] else { continue }
+            let layout = view.layoutManager
+            let text = view.text as NSString
+            func lineTop(_ range: NSRange) -> CGFloat {
+                layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: range.location),
+                                        effectiveRange: nil).minY
+            }
+
+            // 같은 줄에서 띄어쓰기만 사이에 둔 글자들은 한 덩어리로 묶는다.
+            var runs: [NSRange] = []
+            for range in ranges {
+                if let last = runs.last {
+                    let gap = NSRange(location: NSMaxRange(last), length: range.location - NSMaxRange(last))
+                    let onlySpaces = text.substring(with: gap).allSatisfy { $0 == " " || $0 == "\t" }
+                    if onlySpaces, lineTop(last) == lineTop(range) {
+                        runs[runs.count - 1] = NSRange(location: last.location,
+                                                       length: NSMaxRange(range) - last.location)
+                        continue
+                    }
+                }
+                runs.append(range)
+            }
+
+            let pieces = runs.map { run -> TextItem in
+                let glyphs = layout.glyphRange(forCharacterRange: run, actualCharacterRange: nil)
+                let rect = layout.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
+                return TextItem(x: view.frame.minX + rect.minX, y: view.frame.minY + lineTop(run),
+                                text: text.substring(with: run))
+            }
+
+            let remaining = NSMutableString(string: text)
+            for run in runs.reversed() {
+                remaining.deleteCharacters(in: run)
+            }
+            let rest = remaining as String
+            if rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                removeItem(id)
+            } else if let index = note.texts.firstIndex(where: { $0.id == id }) {
+                note.texts[index].text = rest
+                view.attributedText = NSAttributedString(string: rest, attributes: Self.textAttributes)
+                layoutText(id)
+            }
+
+            for piece in pieces {
+                note.texts.append(piece)
+                addTextView(for: piece)
+                layoutText(piece.id)
+                lassoItems.append(piece.id)
+            }
+        }
+        lassoPartial = [:]
+    }
+
     private func translateLasso(by delta: CGPoint) {
         for id in lassoItems {
             if let view = itemView(id) {
@@ -512,6 +599,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     /// 끄는 동안 필기를 매번 다시 그리면 끊기므로, 고른 획은 그림 한 장으로 떠서 그것만 움직인다.
     private func beginLassoMove() {
+        splitPartialSelections()
         lassoMoving = true
         lassoMoved = .zero
         guard !lassoStrokes.isEmpty else { return }
@@ -576,6 +664,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         lassoLayer.path = nil
         lassoItems = []
         lassoStrokes = []
+        lassoPartial = [:]
         lassoMoving = false
         lassoGhost?.removeFromSuperview()
         lassoGhost = nil

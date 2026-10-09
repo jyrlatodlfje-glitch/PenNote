@@ -42,6 +42,18 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
     private lazy var movePan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
     private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
+    private lazy var lassoPan = UIPanGestureRecognizer(target: self, action: #selector(handleLasso))
+
+    // 올가미: 둘러싼 글자·사진·필기를 한꺼번에 옮긴다.
+    private let overlay = UIView()
+    private let lassoLayer = CAShapeLayer()
+    private var lassoPath: UIBezierPath?
+    private var lassoItems: [UUID] = []
+    private var lassoStrokes: [Int] = []
+    private var lassoMoving = false
+    private var lassoMoved = CGPoint.zero
+    private var lastLassoPoint = CGPoint.zero
+    private var hasLassoSelection: Bool { !lassoItems.isEmpty || !lassoStrokes.isEmpty }
 
     init(note: Note) {
         self.note = note
@@ -74,11 +86,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
         applyTemplate()
 
-        for gesture in [tap, movePan, pinch] as [UIGestureRecognizer] {
+        overlay.isUserInteractionEnabled = false
+        lassoLayer.strokeColor = UIColor.systemBlue.cgColor
+        lassoLayer.fillColor = UIColor.systemBlue.withAlphaComponent(0.08).cgColor
+        lassoLayer.lineWidth = 1.5
+        lassoLayer.lineDashPattern = [6, 4]
+        overlay.layer.addSublayer(lassoLayer)
+        canvas.addSubview(overlay)
+
+        lassoPan.maximumNumberOfTouches = 1
+        for gesture in [tap, movePan, pinch, lassoPan] as [UIGestureRecognizer] {
             gesture.delegate = self
             canvas.addGestureRecognizer(gesture)
         }
         canvas.panGestureRecognizer.require(toFail: movePan)
+        canvas.panGestureRecognizer.require(toFail: lassoPan)
     }
 
     required init?(coder: NSCoder) {
@@ -111,16 +133,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         case .eraser:
             canvas.tool = PKEraserTool(.vector)
         case .lasso:
-            canvas.tool = PKLassoTool()
+            break
         }
         let selecting = tool == .select
+        let lassoing = tool == .lasso
         // pencilOnly로 두면 손가락은 그리지 않고 스크롤만 한다.
-        canvas.drawingPolicy = selecting ? .pencilOnly : .anyInput
-        tap.isEnabled = selecting
+        canvas.drawingPolicy = selecting || lassoing ? .pencilOnly : .anyInput
+        tap.isEnabled = selecting || lassoing
         movePan.isEnabled = selecting
         pinch.isEnabled = selecting
+        lassoPan.isEnabled = lassoing
         if !selecting {
             deselect()
+        }
+        if !lassoing {
+            clearLasso()
         }
     }
 
@@ -274,7 +301,29 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     }
 
     func deleteSelected() {
+        if hasLassoSelection {
+            lassoItems.forEach(removeItem)
+            if !lassoStrokes.isEmpty {
+                var strokes = canvas.drawing.strokes
+                for index in lassoStrokes.sorted(by: >) where index < strokes.count {
+                    strokes.remove(at: index)
+                }
+                canvas.drawing = PKDrawing(strokes: strokes)
+                note.drawing = canvas.drawing.dataRepresentation()
+            }
+            clearLasso()
+            commit()
+            return
+        }
         guard let id = selectedID else { return }
+        removeItem(id)
+        selectedID = nil
+        handle.isHidden = true
+        onSelectionChange?(false)
+        commit()
+    }
+
+    private func removeItem(_ id: UUID) {
         if let view = textViews.removeValue(forKey: id) {
             view.removeFromSuperview()
             note.texts.removeAll { $0.id == id }
@@ -287,15 +336,12 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             }
             note.images.removeAll { $0.id == id }
         }
-        selectedID = nil
-        handle.isHidden = true
-        onSelectionChange?(false)
-        commit()
     }
 
     // MARK: - 필기
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        guard !lassoMoving else { return }
         let data = canvasView.drawing.dataRepresentation()
         guard data != note.drawing else { return }
         note.drawing = data
@@ -316,7 +362,135 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
 
+    @objc private func handleLasso(_ gesture: UIPanGestureRecognizer) {
+        let point = gesture.location(in: underlay)
+        switch gesture.state {
+        case .began:
+            if hasLassoSelection, let path = lassoPath, path.bounds.insetBy(dx: -12, dy: -12).contains(point) {
+                lassoMoving = true
+                lassoMoved = .zero
+            } else {
+                clearLasso()
+                let path = UIBezierPath()
+                path.move(to: point)
+                lassoPath = path
+            }
+            lastLassoPoint = point
+        case .changed:
+            if lassoMoving {
+                translateLasso(by: CGPoint(x: point.x - lastLassoPoint.x, y: point.y - lastLassoPoint.y))
+            } else {
+                lassoPath?.addLine(to: point)
+                lassoLayer.path = lassoPath?.cgPath
+            }
+            lastLassoPoint = point
+        case .ended, .cancelled:
+            if lassoMoving {
+                finishLassoMove()
+            } else {
+                finishLassoLoop()
+            }
+        default:
+            break
+        }
+    }
+
+    private func finishLassoLoop() {
+        guard let path = lassoPath else { return }
+        path.close()
+        let loopCenter = CGPoint(x: path.bounds.midX, y: path.bounds.midY)
+
+        // 글상자는 통째로 고른다: 글자 중심이 올가미 안이거나, 올가미가 글상자 안에 그려졌을 때.
+        let texts = note.texts.filter { item in
+            guard let view = textViews[item.id] else { return false }
+            let rect = view.layoutManager.usedRect(for: view.textContainer)
+                .offsetBy(dx: view.frame.minX, dy: view.frame.minY)
+            return path.contains(CGPoint(x: rect.midX, y: rect.midY)) || rect.contains(loopCenter)
+        }
+        let images = note.images.filter { item in
+            guard let frame = imageViews[item.id]?.frame else { return false }
+            return path.contains(CGPoint(x: frame.midX, y: frame.midY))
+        }
+        lassoItems = texts.map { $0.id } + images.map { $0.id }
+        lassoStrokes = canvas.drawing.strokes.enumerated().compactMap { index, stroke in
+            var inside = 0
+            var total = 0
+            for strokePoint in stroke.path {
+                total += 1
+                if path.contains(strokePoint.location.applying(stroke.transform)) {
+                    inside += 1
+                }
+            }
+            return total > 0 && inside * 2 > total ? index : nil
+        }
+
+        if hasLassoSelection {
+            lassoLayer.path = path.cgPath
+            onSelectionChange?(true)
+        } else {
+            clearLasso()
+        }
+    }
+
+    private func translateLasso(by delta: CGPoint) {
+        for id in lassoItems {
+            if let view = itemView(id) {
+                view.frame.origin = CGPoint(x: view.frame.minX + delta.x, y: view.frame.minY + delta.y)
+            }
+        }
+        let move = CGAffineTransform(translationX: delta.x, y: delta.y)
+        if !lassoStrokes.isEmpty {
+            var strokes = canvas.drawing.strokes
+            for index in lassoStrokes where index < strokes.count {
+                strokes[index].transform = strokes[index].transform.concatenating(move)
+            }
+            canvas.drawing = PKDrawing(strokes: strokes)
+        }
+        lassoPath?.apply(move)
+        lassoLayer.path = lassoPath?.cgPath
+        lassoMoved = CGPoint(x: lassoMoved.x + delta.x, y: lassoMoved.y + delta.y)
+    }
+
+    private func finishLassoMove() {
+        // 줄노트·모눈에서는 줄 간격 단위로 옮겨서 글자가 줄에서 벗어나지 않게 한다.
+        if note.template != .blank {
+            let line = Self.lineHeight
+            let snapped = (lassoMoved.y / line).rounded() * line
+            translateLasso(by: CGPoint(x: 0, y: snapped - lassoMoved.y))
+        }
+        for id in lassoItems {
+            guard let frame = itemView(id)?.frame else { continue }
+            if let index = note.texts.firstIndex(where: { $0.id == id }) {
+                note.texts[index].x = max(0, frame.minX)
+                note.texts[index].y = max(0, frame.minY)
+                layoutText(id)
+            } else if let index = note.images.firstIndex(where: { $0.id == id }) {
+                note.images[index].x = frame.minX
+                note.images[index].y = max(0, frame.minY)
+            }
+        }
+        lassoMoving = false
+        note.drawing = canvas.drawing.dataRepresentation()
+        commit()
+    }
+
+    private func clearLasso() {
+        let hadSelection = hasLassoSelection
+        lassoPath = nil
+        lassoLayer.path = nil
+        lassoItems = []
+        lassoStrokes = []
+        lassoMoving = false
+        if hadSelection {
+            onSelectionChange?(false)
+        }
+    }
+
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        if currentTool == .lasso {
+            clearLasso()
+            return
+        }
         let point = gesture.location(in: underlay)
         if let id = hitItem(at: point) {
             select(id)
@@ -529,6 +703,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             canvas.contentSize = size
         }
         underlay.frame = CGRect(origin: .zero, size: size)
+        overlay.frame = underlay.frame
     }
 
     private func contentBottom() -> CGFloat {

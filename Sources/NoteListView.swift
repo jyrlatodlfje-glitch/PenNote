@@ -1,80 +1,192 @@
 import SwiftUI
 
+enum Route: Hashable {
+    case folder(UUID)
+    case note(UUID)
+}
+
 struct NoteListView: View {
     @EnvironmentObject private var store: NoteStore
-    @State private var path: [UUID] = []
-    @State private var renaming: Note?
-    @State private var newName = ""
+    @State private var path: [Route] = []
 
     var body: some View {
         NavigationStack(path: $path) {
-            List {
-                ForEach(store.notes) { note in
-                    NavigationLink(value: note.id) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(note.title)
-                                .lineLimit(1)
-                            Text(note.modified, style: .date)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+            NoteBrowser(folderID: nil, path: $path)
+                .navigationDestination(for: Route.self) { route in
+                    switch route {
+                    case .folder(let id):
+                        NoteBrowser(folderID: id, path: $path)
+                    case .note(let id):
+                        if let note = store.notes.first(where: { $0.id == id }) {
+                            NoteEditorView(note: note)
                         }
-                    }
-                    .contextMenu {
-                        Button {
-                            newName = note.title
-                            renaming = note
-                        } label: {
-                            Label("제목 수정", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            store.delete(note.id)
-                        } label: {
-                            Label("삭제", systemImage: "trash")
-                        }
-                    }
-                    .swipeActions(edge: .leading) {
-                        Button("제목 수정") {
-                            newName = note.title
-                            renaming = note
-                        }
-                        .tint(.blue)
                     }
                 }
-                .onDelete { store.delete(at: $0) }
+        }
+    }
+}
+
+/// 폴더 하나(또는 폴더 밖)의 노트 목록. 맨 위 화면에서는 폴더 목록도 함께 보여준다.
+struct NoteBrowser: View {
+    let folderID: UUID?
+    @Binding var path: [Route]
+
+    @EnvironmentObject private var store: NoteStore
+    @State private var prompt: Prompt?
+    @State private var showPrompt = false
+    @State private var promptText = ""
+
+    enum Prompt {
+        case newFolder
+        case renameFolder(Folder)
+        case renameNote(Note)
+
+        var title: String {
+            switch self {
+            case .newFolder: return "새 폴더"
+            case .renameFolder: return "폴더 이름"
+            case .renameNote: return "노트 제목"
             }
-            .alert("노트 제목", isPresented: Binding(
-                get: { renaming != nil },
-                set: { if !$0 { renaming = nil } }
-            )) {
-                TextField("제목", text: $newName)
-                Button("저장") {
-                    if let note = renaming {
-                        store.rename(note.id, to: newName)
+        }
+    }
+
+    private var notes: [Note] { store.notes(in: folderID) }
+    private var showsFolders: Bool { folderID == nil && !store.folders.isEmpty }
+
+    var body: some View {
+        List {
+            if showsFolders {
+                Section("폴더") {
+                    ForEach(store.folders) { folder in
+                        folderRow(folder)
                     }
                 }
-                Button("취소", role: .cancel) {}
             }
-            .overlay {
-                if store.notes.isEmpty {
-                    Text("오른쪽 위 + 를 눌러 노트를 만드세요")
-                        .foregroundColor(.secondary)
+            Section {
+                ForEach(notes) { note in
+                    noteRow(note)
+                }
+                .onDelete { offsets in
+                    offsets.map { notes[$0].id }.forEach { store.delete($0) }
+                }
+            } header: {
+                if showsFolders {
+                    Text("노트")
                 }
             }
-            .navigationTitle("펜노트")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+        }
+        .overlay {
+            if notes.isEmpty && !showsFolders {
+                Text("오른쪽 위 + 를 눌러 노트를 만드세요")
+                    .foregroundColor(.secondary)
+            }
+        }
+        .navigationTitle(store.folders.first { $0.id == folderID }?.name ?? "펜노트")
+        .toolbar {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                if folderID == nil {
                     Button {
-                        path.append(store.addNote().id)
+                        ask(.newFolder, text: "")
                     } label: {
-                        Image(systemName: "plus")
+                        Image(systemName: "folder.badge.plus")
                     }
                 }
-            }
-            .navigationDestination(for: UUID.self) { id in
-                if let note = store.notes.first(where: { $0.id == id }) {
-                    NoteEditorView(note: note)
+                Button {
+                    path.append(.note(store.addNote(in: folderID).id))
+                } label: {
+                    Image(systemName: "plus")
                 }
             }
+        }
+        .alert(prompt?.title ?? "", isPresented: $showPrompt) {
+            TextField("이름", text: $promptText)
+            Button("저장") { confirmPrompt() }
+            Button("취소", role: .cancel) {}
+        }
+    }
+
+    private func folderRow(_ folder: Folder) -> some View {
+        NavigationLink(value: Route.folder(folder.id)) {
+            Label(folder.name, systemImage: "folder")
+        }
+        .badge(store.notes(in: folder.id).count)
+        // 노트를 길게 눌러 끌어다 놓으면 이 폴더로 옮긴다.
+        .dropDestination(for: String.self) { items, _ in
+            guard let noteID = items.first.flatMap({ UUID(uuidString: $0) }) else { return false }
+            store.move(noteID, to: folder.id)
+            return true
+        }
+        .contextMenu {
+            Button {
+                ask(.renameFolder(folder), text: folder.name)
+            } label: {
+                Label("이름 수정", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                store.deleteFolder(folder.id)
+            } label: {
+                Label("폴더 삭제 (노트는 남김)", systemImage: "trash")
+            }
+        }
+    }
+
+    private func noteRow(_ note: Note) -> some View {
+        NavigationLink(value: Route.note(note.id)) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(note.title)
+                    .lineLimit(1)
+                Text(note.modified, style: .date)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .draggable(note.id.uuidString)
+        .contextMenu {
+            Button {
+                ask(.renameNote(note), text: note.title)
+            } label: {
+                Label("제목 수정", systemImage: "pencil")
+            }
+            Menu {
+                if note.folderID != nil {
+                    Button("폴더 밖으로") { store.move(note.id, to: nil) }
+                }
+                ForEach(store.folders.filter { $0.id != note.folderID }) { folder in
+                    Button(folder.name) { store.move(note.id, to: folder.id) }
+                }
+            } label: {
+                Label("폴더로 이동", systemImage: "folder")
+            }
+            Button(role: .destructive) {
+                store.delete(note.id)
+            } label: {
+                Label("삭제", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .leading) {
+            Button("제목 수정") {
+                ask(.renameNote(note), text: note.title)
+            }
+            .tint(.blue)
+        }
+    }
+
+    private func ask(_ prompt: Prompt, text: String) {
+        promptText = text
+        self.prompt = prompt
+        showPrompt = true
+    }
+
+    private func confirmPrompt() {
+        switch prompt {
+        case .newFolder:
+            store.addFolder(named: promptText)
+        case .renameFolder(let folder):
+            store.renameFolder(folder.id, to: promptText)
+        case .renameNote(let note):
+            store.rename(note.id, to: promptText)
+        case nil:
+            break
         }
     }
 }

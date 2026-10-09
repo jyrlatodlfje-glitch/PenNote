@@ -23,8 +23,55 @@ enum InkColor: String, CaseIterable, Identifiable {
     }
 }
 
+/// 누르고 있는 동안 동작을 반복하는 키. 잠깐 누르면 한 번만 실행된다.
+struct RepeatKey: View {
+    let icon: String
+    let action: () -> Void
+
+    @State private var pressed = false
+    @State private var timer: Timer?
+
+    var body: some View {
+        Image(systemName: icon)
+            .foregroundColor(.accentColor)
+            .opacity(pressed ? 0.4 : 1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !pressed else { return }
+                        pressed = true
+                        action()
+                        schedule(after: 0.4, repeats: false) {
+                            schedule(after: 0.08, repeats: true, action)
+                        }
+                    }
+                    .onEnded { _ in stop() }
+            )
+            .onDisappear { stop() }
+    }
+
+    private func schedule(after interval: TimeInterval, repeats: Bool, _ block: @escaping () -> Void) {
+        timer?.invalidate()
+        let next = Timer(timeInterval: interval, repeats: repeats) { _ in block() }
+        RunLoop.main.add(next, forMode: .common)
+        timer = next
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
+        pressed = false
+    }
+}
+
 struct NoteEditorView: View {
     @EnvironmentObject private var store: NoteStore
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    private var landscape: Bool { verticalSizeClass == .compact }
+    private let pageWidth = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
 
     @StateObject private var recognizer = InkRecognizer()
     @StateObject private var page = PageController()
@@ -65,18 +112,27 @@ struct NoteEditorView: View {
             Divider()
             toolRow
             Divider()
-            PageCanvas(initialNote: note, controller: page, tool: tool, color: inkColor.uiColor,
-                       useKeyboard: useKeyboard) { changed in
-                note = changed
-                store.update(changed)
-            }
+            // 가로에서는 페이지 폭을 세로 때와 같게 두고, 남는 오른쪽에 글씨 칸을 놓는다.
+            let layout = landscape ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            layout {
+                PageCanvas(initialNote: note, controller: page, tool: tool, color: inkColor.uiColor,
+                           useKeyboard: useKeyboard) { changed in
+                    note = changed
+                    store.update(changed)
+                }
+                .frame(width: landscape ? pageWidth : nil)
 
-            if tool == .select && !useKeyboard && !titleFocused {
-                Divider()
-                statusBar
-                InkPad(controller: pad, onIdle: recognize)
-                    .frame(height: 200)
-                keyRow
+                if tool == .select && !useKeyboard && !titleFocused {
+                    Divider()
+                    VStack(spacing: 0) {
+                        statusBar
+                        InkPad(controller: pad, onIdle: recognize)
+                            .frame(height: landscape ? nil : 200)
+                        keyRow
+                    }
+                } else if landscape {
+                    Color(.secondarySystemBackground)
+                }
             }
         }
         .navigationTitle("")
@@ -283,7 +339,7 @@ struct NoteEditorView: View {
             }
             key(icon: "scribble") { pad.undoLastStroke() }
             key(icon: "space") { type(" ") }
-            key(icon: "delete.left") {
+            RepeatKey(icon: "delete.left") {
                 page.backspace()
                 alternatives = []
             }

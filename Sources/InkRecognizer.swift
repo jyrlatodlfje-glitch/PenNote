@@ -41,6 +41,8 @@ final class InkRecognizer: ObservableObject {
 
     private var recognizers: [InkLanguage: DigitalInkRecognizer] = [:]
     private var downloadFailed = false
+    private var jobs: [(@escaping () -> Void) -> Void] = []
+    private var jobRunning = false
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -84,6 +86,29 @@ final class InkRecognizer: ObservableObject {
     /// `area`는 글씨 칸의 크기, `preceding`은 커서 앞의 글. 둘 다 기호와 대소문자 판별을 돕는다.
     func recognize(_ strokes: [[StrokeSample]], area: CGSize, preceding: String,
                    completion: @escaping ([String]) -> Void) {
+        // 이어서 쓴 글이 순서대로 들어가도록, 앞 요청이 끝난 뒤에 다음 요청을 처리한다.
+        jobs.append { [weak self] done in
+            guard let self else { return }
+            self.perform(strokes, area: area, preceding: preceding) { texts in
+                completion(texts)
+                done()
+            }
+        }
+        runNextJob()
+    }
+
+    private func runNextJob() {
+        guard !jobRunning, !jobs.isEmpty else { return }
+        jobRunning = true
+        let job = jobs.removeFirst()
+        job { [weak self] in
+            self?.jobRunning = false
+            self?.runNextJob()
+        }
+    }
+
+    private func perform(_ strokes: [[StrokeSample]], area: CGSize, preceding: String,
+                         completion: @escaping ([String]) -> Void) {
         guard !strokes.isEmpty else {
             completion([])
             return

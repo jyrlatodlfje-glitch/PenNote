@@ -8,8 +8,10 @@ struct StrokeSample {
 }
 
 /// 글씨 쓰는 칸. 펜을 떼고 `idleDelay` 동안 쉬면 쓴 획을 넘겨주고 스스로 비운다.
+/// 오른쪽까지 쓴 뒤 왼쪽으로 돌아와 새로 쓰기 시작하면, 기다리지 않고 바로 넘기고 비운다.
 final class InkPadView: UIView {
-    var onIdle: (([[StrokeSample]]) -> Void)?
+    /// `(획, 줄바꿈)`: 줄바꿈은 칸을 다 채우고 왼쪽에서 이어 쓴 경우 true
+    var onIdle: (([[StrokeSample]], Bool) -> Void)?
     var idleDelay: TimeInterval = 0.8
 
     private var strokes: [[StrokeSample]] = []
@@ -44,6 +46,11 @@ final class InkPadView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
         idleTimer?.invalidate()
+        // 한 글자 안에서 왼쪽으로 조금 돌아가는 것과 구분되도록, 칸 폭의 절반 가까이 돌아왔을 때만 줄바꿈으로 본다.
+        if let inkRight = strokes.flatMap({ $0 }).map({ $0.x }).max(),
+           touch.location(in: self).x < inkRight - bounds.width * 0.45 {
+            flush(wrapped: true)
+        }
         current = [sample(touch)]
         setNeedsDisplay()
     }
@@ -80,12 +87,16 @@ final class InkPadView: UIView {
         idleTimer?.invalidate()
         guard !strokes.isEmpty else { return }
         idleTimer = Timer.scheduledTimer(withTimeInterval: idleDelay, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            let finished = self.strokes
-            self.strokes = []
-            self.setNeedsDisplay()
-            self.onIdle?(finished)
+            self?.flush(wrapped: false)
         }
+    }
+
+    private func flush(wrapped: Bool) {
+        guard !strokes.isEmpty else { return }
+        let finished = strokes
+        strokes = []
+        setNeedsDisplay()
+        onIdle?(finished, wrapped)
     }
 
     override func draw(_ rect: CGRect) {
@@ -127,7 +138,7 @@ final class PadController: ObservableObject {
 
 struct InkPad: UIViewRepresentable {
     let controller: PadController
-    let onIdle: ([[StrokeSample]]) -> Void
+    let onIdle: ([[StrokeSample]], Bool) -> Void
 
     func makeUIView(context: Context) -> InkPadView {
         let view = InkPadView()

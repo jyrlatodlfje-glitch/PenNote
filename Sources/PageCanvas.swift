@@ -17,6 +17,7 @@ final class PageController: ObservableObject {
     func setTemplate(_ template: PaperTemplate) { view?.setTemplate(template) }
     func setName(_ name: String) { view?.setName(name) }
     func makePDF() -> Data? { view?.makePDF() }
+    func makeOneNotePage() -> OneNotePage? { view?.makeOneNotePage() }
     func undo() { view?.undo() }
     func redo() { view?.redo() }
 }

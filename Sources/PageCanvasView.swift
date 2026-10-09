@@ -5,6 +5,25 @@ enum PageTool: Equatable {
     case select, pen, highlighter, eraser, lasso
 }
 
+/// 안에 든 글상자·사진이 터치를 가로채지 않게 한다. 터치는 모두 캔버스의 제스처가 처리한다.
+/// (글상자가 터치를 받으면 그 위에서 시작한 끌기가 글상자에 먹혀 이동이 되지 않는다.)
+final class PassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        nil
+    }
+}
+
+struct OneNoteFile {
+    let name: String
+    let type: String
+    let data: Data
+}
+
+struct OneNotePage {
+    let html: String
+    let files: [OneNoteFile]
+}
+
 /// 노트 한 장. 속지·사진·글자는 필기 레이어 아래에 깔리고, 그 위에 PencilKit으로 그린다.
 final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate {
     static let lineHeight: CGFloat = 30
@@ -28,7 +47,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private(set) var note: Note
     private let canvas = PKCanvasView()
-    private let underlay = UIView()
+    private let underlay = PassthroughView()
     private let handle = UIView()
     private var textViews: [UUID: UITextView] = [:]
     private var imageViews: [UUID: UIImageView] = [:]
@@ -36,6 +55,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private var currentTool: PageTool?
     private var currentColor: UIColor?
     private var laidOutWidth: CGFloat = 0
+    /// 확대하지 않았을 때의 종이 크기. 글자·사진·필기의 좌표는 모두 이 크기 기준이다.
+    private var pageSize = CGSize.zero
+    private var separators: [UIView] = []
     private var dragStart = CGRect.zero
     private var isResizing = false
 
@@ -53,6 +75,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private var lassoMoving = false
     private var lassoMoved = CGPoint.zero
     private var lastLassoPoint = CGPoint.zero
+    private var lassoGhost: UIImageView?
+    private var lassoPicked: [PKStroke] = []
+    private var lassoRest: [PKStroke] = []
     private var hasLassoSelection: Bool { !lassoItems.isEmpty || !lassoStrokes.isEmpty }
 
     init(note: Note) {
@@ -60,12 +85,18 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         super.init(frame: .zero)
         // 종이는 다크 모드에서도 흰색으로 둔다.
         overrideUserInterfaceStyle = .light
-        backgroundColor = .white
+        // 종이 바깥은 회색으로 두어 종이의 끝이 보이게 한다.
+        backgroundColor = UIColor(white: 0.88, alpha: 1)
 
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.alwaysBounceVertical = true
+        canvas.minimumZoomScale = 0.5
+        canvas.maximumZoomScale = 4
         canvas.delegate = self
+        // 확대 배율을 transform으로 줄 때 왼쪽 위가 기준이 되게 한다.
+        underlay.layer.anchorPoint = .zero
+        overlay.layer.anchorPoint = .zero
         if let drawing = try? PKDrawing(data: note.drawing) {
             canvas.drawing = drawing
         }
@@ -101,6 +132,19 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
         canvas.panGestureRecognizer.require(toFail: movePan)
         canvas.panGestureRecognizer.require(toFail: lassoPan)
+        // 사진이 선택되어 있으면 두 손가락 벌리기는 사진 크기 조절이 먼저다.
+        canvas.pinchGestureRecognizer?.require(toFail: pinch)
+    }
+
+    /// A4 한 장의 높이. 줄 중간에서 쪽이 나뉘지 않게 줄 간격의 배수로 맞춘다.
+    private var pageHeight: CGFloat {
+        let line = Self.lineHeight
+        return (max(bounds.width, 100) * 297 / 210 / line).rounded(.down) * line
+    }
+
+    /// 화면 왼쪽 위에 보이는 종이 위의 세로 위치
+    private var visibleTop: CGFloat {
+        max(0, canvas.contentOffset.y / canvas.zoomScale)
     }
 
     required init?(coder: NSCoder) {
@@ -169,8 +213,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     func makePDF() -> Data {
         let line = Self.lineHeight
         let width = max(bounds.width, 100)
-        // 줄 중간에서 쪽이 나뉘지 않게 쪽 높이를 줄 간격의 배수로 맞춘다.
-        let pageHeight = (width * 297 / 210 / line).rounded(.down) * line
+        let pageHeight = self.pageHeight
         let bottom = contentBottom()
         let drawing = canvas.drawing
         let imageFolder = NoteStore.imageFolder(for: note.id)
@@ -230,6 +273,56 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
     }
 
+    /// OneNote 페이지로 보낼 내용. 글자는 OneNote에서 고칠 수 있는 텍스트로, 사진과 필기는 이미지로 같은 자리에 놓는다.
+    func makeOneNotePage() -> OneNotePage {
+        func escape(_ text: String) -> String {
+            text.replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+        }
+        func position(_ x: CGFloat, _ y: CGFloat) -> String {
+            "position:absolute;left:\(Int(x))px;top:\(Int(y))px"
+        }
+        var body = ""
+        var files: [OneNoteFile] = []
+
+        let folder = NoteStore.imageFolder(for: note.id)
+        for (index, item) in note.images.enumerated() {
+            guard let data = try? Data(contentsOf: folder.appendingPathComponent(item.fileName)) else { continue }
+            let name = "image\(index)"
+            files.append(OneNoteFile(name: name, type: "image/jpeg", data: data))
+            body += "<img src=\"name:\(name)\" width=\"\(Int(item.width))\" height=\"\(Int(item.height))\" "
+                + "style=\"\(position(item.x, item.y))\" />"
+        }
+
+        let drawing = canvas.drawing
+        let inkBounds = drawing.bounds
+        if !inkBounds.isNull, !inkBounds.isInfinite, !inkBounds.isEmpty {
+            var image: UIImage?
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                image = drawing.image(from: inkBounds, scale: 2)
+            }
+            if let data = image?.pngData() {
+                files.append(OneNoteFile(name: "ink", type: "image/png", data: data))
+                body += "<img src=\"name:ink\" width=\"\(Int(inkBounds.width))\" height=\"\(Int(inkBounds.height))\" "
+                    + "style=\"\(position(inkBounds.minX, inkBounds.minY))\" />"
+            }
+        }
+
+        for item in note.texts.sorted(by: { ($0.y, $0.x) < ($1.y, $1.x) }) {
+            let width = textViews[item.id]?.frame.width ?? 300
+            let paragraphs = item.text
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.isEmpty ? "<br />" : "<p style=\"margin:0\">\(escape(String($0)))</p>" }
+                .joined()
+            body += "<div style=\"\(position(item.x, item.y));width:\(Int(width))px\">\(paragraphs)</div>"
+        }
+
+        let html = "<!DOCTYPE html><html><head><title>\(escape(note.title))</title></head>"
+            + "<body data-absolute-enabled=\"true\">\(body)</body></html>"
+        return OneNotePage(html: html, files: files)
+    }
+
     func undo() { canvas.undoManager?.undo() }
     func redo() { canvas.undoManager?.redo() }
 
@@ -237,7 +330,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func insertText(_ string: String) {
         if selectedTextView == nil {
-            createText(at: CGPoint(x: 16, y: canvas.contentOffset.y + Self.lineHeight))
+            createText(at: CGPoint(x: 16, y: visibleTop + Self.lineHeight))
         }
         guard let textView = selectedTextView else { return }
         textView.typingAttributes = Self.textAttributes
@@ -311,7 +404,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             return
         }
         let width = max(60, bounds.width - 40)
-        let item = ImageItem(x: 20, y: canvas.contentOffset.y + 20,
+        let item = ImageItem(x: 20, y: visibleTop + 20,
                              width: width, height: width * size.height / size.width,
                              fileName: fileName)
         note.images.append(item)
@@ -387,9 +480,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         let point = gesture.location(in: underlay)
         switch gesture.state {
         case .began:
-            if hasLassoSelection, let path = lassoPath, path.bounds.insetBy(dx: -12, dy: -12).contains(point) {
-                lassoMoving = true
-                lassoMoved = .zero
+            if hasLassoSelection, let path = lassoPath, path.bounds.insetBy(dx: -24, dy: -24).contains(point) {
+                beginLassoMove()
             } else {
                 clearLasso()
                 let path = UIBezierPath()
@@ -424,6 +516,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         // 글상자는 통째로 고른다: 글자 중심이 올가미 안이거나, 올가미가 글상자 안에 그려졌을 때.
         let texts = note.texts.filter { item in
             guard let view = textViews[item.id] else { return false }
+            view.layoutManager.ensureLayout(for: view.textContainer)
             let rect = view.layoutManager.usedRect(for: view.textContainer)
                 .offsetBy(dx: view.frame.minX, dy: view.frame.minY)
             return path.contains(CGPoint(x: rect.midX, y: rect.midY)) || rect.contains(loopCenter)
@@ -442,7 +535,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                     inside += 1
                 }
             }
-            return total > 0 && inside * 2 > total ? index : nil
+            let bounds = stroke.renderBounds
+            let centerInside = path.contains(CGPoint(x: bounds.midX, y: bounds.midY))
+            return total > 0 && (inside * 2 > total || centerInside) ? index : nil
         }
 
         if hasLassoSelection {
@@ -459,17 +554,35 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                 view.frame.origin = CGPoint(x: view.frame.minX + delta.x, y: view.frame.minY + delta.y)
             }
         }
-        let move = CGAffineTransform(translationX: delta.x, y: delta.y)
-        if !lassoStrokes.isEmpty {
-            var strokes = canvas.drawing.strokes
-            for index in lassoStrokes where index < strokes.count {
-                strokes[index].transform = strokes[index].transform.concatenating(move)
-            }
-            canvas.drawing = PKDrawing(strokes: strokes)
+        if let ghost = lassoGhost {
+            ghost.frame.origin = CGPoint(x: ghost.frame.minX + delta.x, y: ghost.frame.minY + delta.y)
         }
-        lassoPath?.apply(move)
+        lassoPath?.apply(CGAffineTransform(translationX: delta.x, y: delta.y))
         lassoLayer.path = lassoPath?.cgPath
         lassoMoved = CGPoint(x: lassoMoved.x + delta.x, y: lassoMoved.y + delta.y)
+    }
+
+    /// 끄는 동안 필기를 매번 다시 그리면 끊기므로, 고른 획은 그림 한 장으로 떠서 그것만 움직인다.
+    private func beginLassoMove() {
+        lassoMoving = true
+        lassoMoved = .zero
+        guard !lassoStrokes.isEmpty else { return }
+        let picked = Set(lassoStrokes)
+        let all = canvas.drawing.strokes
+        lassoPicked = all.enumerated().filter { picked.contains($0.offset) }.map { $0.element }
+        lassoRest = all.enumerated().filter { !picked.contains($0.offset) }.map { $0.element }
+
+        let pickedDrawing = PKDrawing(strokes: lassoPicked)
+        let rect = pickedDrawing.bounds.insetBy(dx: -4, dy: -4)
+        var image: UIImage?
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            image = pickedDrawing.image(from: rect, scale: UIScreen.main.scale)
+        }
+        let ghost = UIImageView(image: image)
+        ghost.frame = rect
+        overlay.addSubview(ghost)
+        lassoGhost = ghost
+        canvas.drawing = PKDrawing(strokes: lassoRest)
     }
 
     private func finishLassoMove() {
@@ -478,6 +591,20 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             let line = Self.lineHeight
             let snapped = (lassoMoved.y / line).rounded() * line
             translateLasso(by: CGPoint(x: 0, y: snapped - lassoMoved.y))
+        }
+        if let ghost = lassoGhost {
+            let move = CGAffineTransform(translationX: lassoMoved.x, y: lassoMoved.y)
+            let moved = lassoPicked.map { stroke -> PKStroke in
+                var stroke = stroke
+                stroke.transform = stroke.transform.concatenating(move)
+                return stroke
+            }
+            canvas.drawing = PKDrawing(strokes: lassoRest + moved)
+            lassoStrokes = Array(lassoRest.count..<(lassoRest.count + moved.count))
+            ghost.removeFromSuperview()
+            lassoGhost = nil
+            lassoPicked = []
+            lassoRest = []
         }
         for id in lassoItems {
             guard let frame = itemView(id)?.frame else { continue }
@@ -502,6 +629,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         lassoItems = []
         lassoStrokes = []
         lassoMoving = false
+        lassoGhost?.removeFromSuperview()
+        lassoGhost = nil
         if hadSelection {
             onSelectionChange?(false)
         }
@@ -678,8 +807,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     /// 쪽수가 많은 PDF에서도 메모리가 넘치지 않게, 화면 근처의 이미지만 올려 둔다.
     private func updateVisibleImages() {
-        let near = CGRect(origin: canvas.contentOffset, size: canvas.bounds.size)
-            .insetBy(dx: 0, dy: -canvas.bounds.height)
+        let visibleHeight = canvas.bounds.height / canvas.zoomScale
+        let near = CGRect(x: 0, y: visibleTop, width: bounds.width, height: visibleHeight)
+            .insetBy(dx: 0, dy: -visibleHeight)
         let folder = NoteStore.imageFolder(for: note.id)
         for item in note.images {
             guard let view = imageViews[item.id] else { continue }
@@ -695,6 +825,58 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateVisibleImages()
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        applyZoom()
+        updateVisibleImages()
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        // 확대한 배율에 맞춰 글자를 다시 그려 흐려지지 않게 한다.
+        let sharpness = UIScreen.main.scale * max(1, scale)
+        func sharpen(_ view: UIView) {
+            view.contentScaleFactor = sharpness
+            view.subviews.forEach(sharpen)
+        }
+        textViews.values.forEach(sharpen)
+    }
+
+    /// 종이(글자·사진·속지)와 올가미 표시를 필기 레이어와 같은 배율로 맞춘다.
+    private func applyZoom() {
+        let scale = canvas.zoomScale
+        let scaled = CGSize(width: pageSize.width * scale, height: pageSize.height * scale)
+        if canvas.contentSize != scaled {
+            canvas.contentSize = scaled
+        }
+        for view in [underlay, overlay] {
+            view.bounds = CGRect(origin: .zero, size: pageSize)
+            view.center = .zero
+            view.transform = CGAffineTransform(scaleX: scale, y: scale)
+        }
+        // 축소해서 종이가 화면보다 좁아지면 가운데에 둔다.
+        let side = max(0, (canvas.bounds.width - scaled.width) / 2)
+        if canvas.contentInset.left != side {
+            canvas.contentInset = UIEdgeInsets(top: 0, left: side, bottom: 0, right: side)
+        }
+    }
+
+    /// A4 한 장이 끝나는 자리마다 구분선을 긋는다. 불러온 PDF는 원래 쪽 테두리가 있어 긋지 않는다.
+    private func updateSeparators() {
+        let pages = note.pageBreaks == nil ? Int((pageSize.height / pageHeight).rounded()) : 0
+        let needed = max(0, pages - 1)
+        while separators.count < needed {
+            let line = UIView()
+            line.backgroundColor = UIColor(white: 0.55, alpha: 1)
+            underlay.addSubview(line)
+            separators.append(line)
+        }
+        while separators.count > needed {
+            separators.removeLast().removeFromSuperview()
+        }
+        for (index, line) in separators.enumerated() {
+            line.frame = CGRect(x: 0, y: CGFloat(index + 1) * pageHeight - 1, width: pageSize.width, height: 2)
+        }
     }
 
     private func layoutText(_ id: UUID) {
@@ -724,12 +906,14 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private func applyTemplate() {
         guard note.template != .blank else {
-            underlay.backgroundColor = .clear
+            underlay.backgroundColor = .white
             return
         }
         let line = Self.lineHeight
         let grid = note.template == .grid
         let tile = UIGraphicsImageRenderer(size: CGSize(width: line, height: line)).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: line, height: line))
             UIColor(white: 0.8, alpha: 1).setFill()
             context.fill(CGRect(x: 0, y: line - 1, width: line, height: 1))
             if grid {
@@ -741,15 +925,17 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     private func updateContentSize() {
         guard bounds.width > 0 else { return }
-        // 속지 줄이 끊기지 않게 줄 간격의 배수로 맞춘다.
-        let line = Self.lineHeight
-        let height = (max(bounds.height, contentBottom() + 1200) / line).rounded(.up) * line
-        let size = CGSize(width: bounds.width, height: height)
-        if canvas.contentSize != size {
-            canvas.contentSize = size
+        let bottom = contentBottom()
+        let height: CGFloat
+        if let lastBreak = note.pageBreaks?.last {
+            height = max(lastBreak, bottom) + 600
+        } else {
+            // A4 단위로 늘린다. 마지막 장을 절반 넘게 쓰면 다음 장이 생긴다.
+            height = max(1, ((bottom + pageHeight / 2) / pageHeight).rounded(.up)) * pageHeight
         }
-        underlay.frame = CGRect(origin: .zero, size: size)
-        overlay.frame = underlay.frame
+        pageSize = CGSize(width: bounds.width, height: height)
+        applyZoom()
+        updateSeparators()
     }
 
     private func contentBottom() -> CGFloat {

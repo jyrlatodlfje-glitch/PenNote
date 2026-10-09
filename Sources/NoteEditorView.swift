@@ -87,12 +87,15 @@ struct NoteEditorView: View {
     @State private var inkColor = InkColor.black
     @State private var useKeyboard = false
     @State private var lastInserted = ""
+    @State private var lastSuffix = ""
     @State private var alternatives: [String] = []
     @State private var showRecordings = false
     @State private var showCamera = false
     @State private var showPhotoLibrary = false
     @State private var photoItem: PhotosPickerItem?
     @State private var sharedFile: SharedFile?
+    @State private var showOneNoteSettings = false
+    @State private var sendingToOneNote = false
     @State private var titleText: String
     @FocusState private var titleFocused: Bool
 
@@ -115,6 +118,13 @@ struct NoteEditorView: View {
                 .padding(.vertical, 8)
             Divider()
             toolRow
+            if tool == .lasso {
+                Text("옮길 부분을 손가락으로 빙 둘러 그린 뒤, 점선 안을 끌어 옮기세요 · 스크롤은 두 손가락")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            }
             Divider()
             // 가로에서는 페이지 폭을 세로 때와 같게 두고, 남는 오른쪽에 글씨 칸을 놓는다.
             let layout = landscape ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
@@ -177,6 +187,16 @@ struct NoteEditorView: View {
         .sheet(item: $sharedFile) { file in
             ActivityView(url: file.url)
         }
+        .sheet(isPresented: $showOneNoteSettings) {
+            OneNoteSettingsView()
+        }
+        .overlay {
+            if sendingToOneNote {
+                ProgressView("OneNote로 보내는 중")
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
                 page.addImage(image)
@@ -218,7 +238,17 @@ struct NoteEditorView: View {
             Button {
                 exportPDF()
             } label: {
-                Label("PDF로 내보내기 (OneNote 등)", systemImage: "square.and.arrow.up")
+                Label("PDF 내보내기", systemImage: "square.and.arrow.up")
+            }
+            Button {
+                sendToOneNote()
+            } label: {
+                Label("OneNote로 보내기", systemImage: "paperplane")
+            }
+            Button {
+                showOneNoteSettings = true
+            } label: {
+                Label("OneNote 연결 설정", systemImage: "link")
             }
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button {
@@ -418,6 +448,25 @@ struct NoteEditorView: View {
         dictatedSegment = ""
     }
 
+    private func sendToOneNote() {
+        let client = OneNoteClient.shared
+        guard client.isReady else {
+            showOneNoteSettings = true
+            return
+        }
+        guard !sendingToOneNote, let content = page.makeOneNotePage() else { return }
+        sendingToOneNote = true
+        Task { @MainActor in
+            do {
+                try await client.createPage(content)
+                audio.errorMessage = "OneNote로 보냈습니다.\n위치: \(client.sectionName)"
+            } catch {
+                audio.errorMessage = "OneNote로 보내지 못했습니다.\n\(error.localizedDescription)"
+            }
+            sendingToOneNote = false
+        }
+    }
+
     private func exportPDF() {
         guard let data = page.makePDF() else { return }
         let name = note.title
@@ -437,17 +486,19 @@ struct NoteEditorView: View {
         alternatives = []
     }
 
-    private func recognize(_ strokes: [[StrokeSample]]) {
+    private func recognize(_ strokes: [[StrokeSample]], wrapped: Bool) {
         recognizer.recognize(strokes, area: pad.size, preceding: page.textBeforeCursor()) { texts in
             guard let best = texts.first else { return }
-            page.insert(best)
+            // 칸을 다 채우고 이어 쓴 경우에는 다음 글과 붙지 않게 한 칸 띄운다.
+            lastSuffix = wrapped ? " " : ""
+            page.insert(best + lastSuffix)
             lastInserted = best
             alternatives = Array(texts.dropFirst().prefix(5))
         }
     }
 
     private func choose(_ candidate: String) {
-        guard page.replaceBeforeCursor(lastInserted, with: candidate) else {
+        guard page.replaceBeforeCursor(lastInserted + lastSuffix, with: candidate + lastSuffix) else {
             alternatives = []
             return
         }

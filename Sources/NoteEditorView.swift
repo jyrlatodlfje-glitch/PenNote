@@ -69,6 +69,7 @@ struct RepeatKey: View {
 struct NoteEditorView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dismiss) private var dismiss
 
     private var landscape: Bool { verticalSizeClass == .compact }
     private let pageWidth = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
@@ -157,6 +158,17 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        // 기본 뒤로 버튼을 숨기면 시스템이 '밀어서 뒤로 가기'를 함께 끈다. 대신 같은 자리에 버튼을 직접 둔다.
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+            }
+        }
         .background(ContentSwipeBackDisabler())
         .onChange(of: titleText) { name in
             page.setName(name)

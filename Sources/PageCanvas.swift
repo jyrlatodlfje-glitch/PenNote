@@ -51,8 +51,8 @@ struct PageCanvas: UIViewRepresentable {
     }
 }
 
-/// 노트 화면에 있는 동안 '화면 어디서든 오른쪽으로 밀어 뒤로 가기'를 끈다.
-/// 펜으로 긋는 가로선과 글자 옮기기가 그 동작에 먹히지 않게 하기 위해서다. 왼쪽 가장자리에서 미는 뒤로 가기는 그대로 둔다.
+/// 노트 화면에 있는 동안 '밀어서 뒤로 가기'를 모두 끈다. 뒤로 가기는 왼쪽 위의 버튼으로만 한다.
+/// 글씨의 가로획, 펜으로 긋는 선, 글자 옮기기가 그 동작에 먹혀 목록 화면으로 넘어가지 않게 하기 위해서다.
 struct ContentSwipeBackDisabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController {
         Controller()
@@ -63,21 +63,46 @@ struct ContentSwipeBackDisabler: UIViewControllerRepresentable {
     final class Controller: UIViewController {
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            setContentSwipeBack(enabled: false)
+            setSwipeBack(enabled: false)
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            // 화면이 다시 그려질 때 시스템이 제스처를 되살리는 경우에 대비해 다시 끈다.
+            if view.window != nil {
+                setSwipeBack(enabled: false)
+            }
         }
 
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
-            setContentSwipeBack(enabled: true)
+            setSwipeBack(enabled: true)
         }
 
-        private func setContentSwipeBack(enabled: Bool) {
-            // 이 제스처는 iOS 26에서 생겼다. 옛 개발 도구로도 빌드되도록 이름으로 찾아 쓴다.
-            let name = "interactiveContentPopGestureRecognizer"
-            guard let navigation = navigationController,
-                  navigation.responds(to: NSSelectorFromString(name)),
-                  let recognizer = navigation.value(forKey: name) as? UIGestureRecognizer else { return }
-            recognizer.isEnabled = enabled
+        /// 밀어서 뒤로 가는 제스처 두 가지(왼쪽 가장자리에서 밀기, 화면 어디서든 밀기)를 모두 켜거나 끈다.
+        private func setSwipeBack(enabled: Bool) {
+            // SwiftUI가 이 컨트롤러를 내비게이션 아래에 직접 달아 주지 않을 수 있어서, 창 전체에서 찾는다.
+            var found: [UINavigationController] = []
+            func collect(_ controller: UIViewController?) {
+                guard let controller else { return }
+                if let navigation = controller as? UINavigationController {
+                    found.append(navigation)
+                }
+                controller.children.forEach(collect)
+            }
+            collect(view.window?.rootViewController)
+            if let own = navigationController {
+                found.append(own)
+            }
+            // "어디서든 밀기"는 iOS 26에서 생겼다. 옛 개발 도구로도 빌드되도록 이름으로 찾아 쓴다.
+            let contentPop = "interactiveContentPopGestureRecognizer"
+            for navigation in found {
+                navigation.interactivePopGestureRecognizer?.isEnabled = enabled
+                if navigation.responds(to: NSSelectorFromString(contentPop)),
+                   let recognizer = navigation.value(forKey: contentPop) as? UIGestureRecognizer {
+                    recognizer.isEnabled = enabled
+                }
+            }
         }
     }
 }

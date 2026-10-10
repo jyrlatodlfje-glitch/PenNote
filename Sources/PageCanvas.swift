@@ -51,6 +51,37 @@ struct PageCanvas: UIViewRepresentable {
     }
 }
 
+/// 노트 화면에 있는 동안 '화면 어디서든 오른쪽으로 밀어 뒤로 가기'를 끈다.
+/// 펜으로 긋는 가로선과 글자 옮기기가 그 동작에 먹히지 않게 하기 위해서다. 왼쪽 가장자리에서 미는 뒤로 가기는 그대로 둔다.
+struct ContentSwipeBackDisabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        Controller()
+    }
+
+    func updateUIViewController(_ controller: UIViewController, context: Context) {}
+
+    final class Controller: UIViewController {
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            setContentSwipeBack(enabled: false)
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            setContentSwipeBack(enabled: true)
+        }
+
+        private func setContentSwipeBack(enabled: Bool) {
+            // 이 제스처는 iOS 26에서 생겼다. 옛 개발 도구로도 빌드되도록 이름으로 찾아 쓴다.
+            let name = "interactiveContentPopGestureRecognizer"
+            guard let navigation = navigationController,
+                  navigation.responds(to: NSSelectorFromString(name)),
+                  let recognizer = navigation.value(forKey: name) as? UIGestureRecognizer else { return }
+            recognizer.isEnabled = enabled
+        }
+    }
+}
+
 /// 공유 화면에 넘길 것: PDF 파일의 URL 또는 텍스트
 struct SharedItem: Identifiable {
     let id = UUID()

@@ -11,7 +11,7 @@ struct StrokeSample {
 /// 쓴 글씨는 바로 지우지 않고 칸에 남겨 두며, 잠깐 멈출 때마다 칸의 글씨 **전체**를 다시 읽게 한다.
 /// 그래서 "남대"까지 쓰고 멈췄다가 이어서 "문에서"를 써도 "남대문에서"로 한 번에 읽힌다.
 /// 칸을 비우고 다음 글로 넘어가는 때는 (1) 왼쪽으로 크게 돌아와 새로 쓰기 시작할 때, (2) 한동안 쓰지 않을 때다.
-final class InkPadView: UIView {
+final class InkPadView: UIView, UIGestureRecognizerDelegate {
     /// 칸에 있는 글씨 전체를 다시 읽어 달라는 요청. 획을 모두 지웠으면 빈 배열.
     var onUpdate: (([[StrokeSample]]) -> Void)?
     /// 칸을 비우고 다음 글로 넘어갔음. 왼쪽으로 돌아와 이어 쓴 경우 true.
@@ -32,6 +32,30 @@ final class InkPadView: UIView {
         backgroundColor = .secondarySystemBackground
         isMultipleTouchEnabled = false
         contentMode = .redraw
+
+        // 최신 iOS는 화면 어디서든 오른쪽으로 밀면 '뒤로 가기'가 된다. 글씨의 가로획이 그 동작에 먹히면
+        // 목록 화면이 나오고 획도 중간에 끊긴다. 칸을 누르는 순간 인식되는 제스처를 하나 두고,
+        // 다른 제스처는 이것이 실패해야만 시작하도록 해서 칸 안의 터치를 글씨 쓰기에만 쓴다.
+        let guardGesture = UILongPressGestureRecognizer(target: self, action: #selector(ignoreGesture))
+        guardGesture.minimumPressDuration = 0
+        guardGesture.allowableMovement = .greatestFiniteMagnitude
+        guardGesture.cancelsTouchesInView = false
+        guardGesture.delaysTouchesBegan = false
+        guardGesture.delaysTouchesEnded = false
+        guardGesture.delegate = self
+        addGestureRecognizer(guardGesture)
+    }
+
+    @objc private func ignoreGesture() {}
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
     }
 
     required init?(coder: NSCoder) {

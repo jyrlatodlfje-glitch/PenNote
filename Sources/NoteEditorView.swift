@@ -157,6 +157,7 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .background(ContentSwipeBackDisabler())
         .onChange(of: titleText) { name in
             page.setName(name)
         }

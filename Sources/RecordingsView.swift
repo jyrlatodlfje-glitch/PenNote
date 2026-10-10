@@ -26,9 +26,9 @@ struct RecordingsView: View {
                             ProgressView()
                         } else {
                             Menu {
-                                Button("한국어 위주 (영어 단어 섞임)") { transcribe(url, language: "ko") }
-                                Button("언어 자동 판별") { transcribe(url, language: nil) }
-                                Button("English") { transcribe(url, language: "en") }
+                                Button("한국어 (빠름)") { transcribe(url, mode: .fast("ko-KR")) }
+                                Button("English (빠름)") { transcribe(url, mode: .fast("en-US")) }
+                                Button("한·영 혼합 (느림)") { transcribe(url, mode: .mixed) }
                             } label: {
                                 Image(systemName: "text.bubble")
                             }
@@ -89,8 +89,8 @@ struct RecordingsView: View {
         }
     }
 
-    private func transcribe(_ url: URL, language: String?) {
-        transcriber.transcribe(url, language: language) { text in
+    private func transcribe(_ url: URL, mode: Transcriber.Mode) {
+        transcriber.transcribe(url, mode: mode) { text in
             onTranscript(text)
             dismiss()
         }

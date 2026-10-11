@@ -47,10 +47,21 @@ struct Note: Identifiable, Codable, Equatable {
     var pageBreaks: [CGFloat]?
     /// 쪽 구분 없이 사방으로 넓게 쓰는 화이트보드인지
     var isWhiteboard: Bool?
+    /// 만다라트 표. 있으면 이 노트는 만다라트 화면으로 연다.
+    var mandala: MandalaBoard?
+    /// 마인드맵. 있으면 이 노트는 마인드맵 화면으로 연다.
+    var mindMap: MindNode?
 
     var title: String {
         if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
             return name
+        }
+        if let mandala {
+            let goal = mandala.cells.indices.contains(MandalaBoard.center) ? mandala.cells[MandalaBoard.center] : ""
+            return goal.isEmpty ? "새 만다라트" : goal
+        }
+        if let mindMap {
+            return mindMap.text.isEmpty ? "새 마인드맵" : mindMap.text
         }
         let lines = texts
             .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
@@ -104,6 +115,22 @@ final class NoteStore: ObservableObject {
         }
         notes.insert(note, at: 0)
         write(note)
+        return note
+    }
+
+    func addMandala(in folderID: UUID? = nil) -> Note {
+        var note = Note()
+        note.folderID = folderID
+        note.mandala = MandalaBoard()
+        add(note)
+        return note
+    }
+
+    func addMindMap(in folderID: UUID? = nil) -> Note {
+        var note = Note()
+        note.folderID = folderID
+        note.mindMap = MindNode()
+        add(note)
         return note
     }
 

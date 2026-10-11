@@ -19,7 +19,13 @@ struct NoteListView: View {
                         NoteBrowser(folderID: id, path: $path)
                     case .note(let id):
                         if let note = store.notes.first(where: { $0.id == id }) {
-                            NoteEditorView(note: note)
+                            if note.mandala != nil {
+                                MandalaEditorView(note: note)
+                            } else if note.mindMap != nil {
+                                MindMapEditorView(note: note)
+                            } else {
+                                NoteEditorView(note: note)
+                            }
                         }
                     }
                 }
@@ -110,6 +116,16 @@ struct NoteBrowser: View {
                         Label("화이트보드", systemImage: "rectangle.dashed")
                     }
                     Button {
+                        path.append(.note(store.addMandala(in: folderID).id))
+                    } label: {
+                        Label("만다라트 표", systemImage: "square.grid.3x3")
+                    }
+                    Button {
+                        path.append(.note(store.addMindMap(in: folderID).id))
+                    } label: {
+                        Label("마인드맵", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
+                    Button {
                         showPDFImporter = true
                     } label: {
                         Label("PDF 불러오기", systemImage: "doc")
@@ -189,7 +205,7 @@ struct NoteBrowser: View {
     private func noteRow(_ note: Note) -> some View {
         NavigationLink(value: Route.note(note.id)) {
             HStack(spacing: 12) {
-                Image(systemName: note.isWhiteboard == true ? "rectangle.dashed" : "note.text")
+                Image(systemName: icon(for: note))
                     .foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(note.title)
@@ -229,6 +245,12 @@ struct NoteBrowser: View {
             }
             .tint(.blue)
         }
+    }
+
+    private func icon(for note: Note) -> String {
+        if note.mandala != nil { return "square.grid.3x3" }
+        if note.mindMap != nil { return "point.3.connected.trianglepath.dotted" }
+        return note.isWhiteboard == true ? "rectangle.dashed" : "note.text"
     }
 
     private func importPDF(_ url: URL) {

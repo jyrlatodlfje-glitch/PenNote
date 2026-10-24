@@ -77,7 +77,9 @@ enum BookScan {
     ///  2026-10-24 사용자: "가로로 찍은 책이 노트에서는 세로로 나온다는거야. 그래서 볼때마다 내가 가로로 돌려줘야해.")
     /// 왼쪽·오른쪽 중 어느 쪽으로 돌릴지는 ① 글자가 이어지는 방향 ② 더 잘 읽히는 쪽 ③ 들고 있던 방향 순서로 정한다.
     private static func upright(_ image: CGImage, held: UIDeviceOrientation) -> CGImage {
-        guard held.isLandscape, image.height > image.width else { return image }
+        // 사진 모양은 보지 않는다: 펼친 책(가로로 긴 것)은 세로로 긴 사진으로, 세로로 긴 A4는 가로로 긴 사진으로
+        // 나오지만 둘 다 글자가 옆으로 누워 있다(2026-10-24 문서 스캔: "아까 책 스캔과 같은 증상이야.").
+        guard held.isLandscape else { return image }
         // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
         var best: CGImagePropertyOrientation = held == .landscapeLeft ? .left : .right
         // 펼친 책 두 쪽이 한 사진에 들어가 글자가 작으므로 줄이지 않고 읽는다(긴 변 2200픽셀 이하).

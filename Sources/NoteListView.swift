@@ -48,6 +48,9 @@ struct NoteBrowser: View {
     @State private var bookMode = false
     @State private var importing = false
     @State private var importFailed = false
+    @State private var showVoiceMemo = false
+    /// 음성 메모 화면이 닫힌 뒤 열 노트
+    @State private var savedMemoID: UUID?
 
     enum Prompt {
         case newFolder
@@ -111,6 +114,11 @@ struct NoteBrowser: View {
                         Label("노트", systemImage: "note.text")
                     }
                     Button {
+                        showVoiceMemo = true
+                    } label: {
+                        Label("음성 메모 (말하면 글자로)", systemImage: "waveform")
+                    }
+                    Button {
                         path.append(.note(store.addNote(in: folderID, whiteboard: true).id))
                     } label: {
                         Label("화이트보드", systemImage: "rectangle.dashed")
@@ -149,6 +157,15 @@ struct NoteBrowser: View {
                 }
                 .disabled(importing)
             }
+        }
+        .sheet(isPresented: $showVoiceMemo, onDismiss: {
+            if let id = savedMemoID {
+                savedMemoID = nil
+                path.append(.note(id))
+            }
+        }) {
+            VoiceMemoView(folderID: folderID) { savedMemoID = $0.id }
+                .environmentObject(store)
         }
         .fullScreenCover(isPresented: $showScanner) {
             DocumentScanner { pages in

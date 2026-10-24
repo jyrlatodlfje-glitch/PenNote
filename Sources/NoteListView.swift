@@ -13,7 +13,7 @@ struct NoteListView: View {
 
     var body: some View {
         navigation
-            // 음성 메모는 ＋ 메뉴에서든 단축어(워치 포함)에서든 시작하면 이 화면이 뜨고, 저장하면 그 노트를 연다.
+            // 음성 메모는 ＋ 메뉴에서든 단축어에서든 시작하면 이 화면이 뜨고, 저장하면 그 노트를 연다.
             .sheet(isPresented: Binding(get: { voiceMemo.memo != nil }, set: { _ in }), onDismiss: {
                 if let id = voiceMemo.savedNoteID {
                     voiceMemo.savedNoteID = nil

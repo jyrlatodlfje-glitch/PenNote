@@ -160,7 +160,7 @@ final class PhoneVoiceMemo: ObservableObject {
 }
 
 /// 지금 받아 적는 음성 메모를 한곳에 둔다. 앱 화면의 버튼뿐 아니라
-/// 단축어·Siri(워치 단축어 포함)로도 같은 메모를 시작하고 멈출 수 있게 하기 위해서다.
+/// 단축어·Siri로도 같은 메모를 시작하고 멈출 수 있게 하기 위해서다.
 final class VoiceMemoCenter: ObservableObject {
     static let shared = VoiceMemoCenter()
 

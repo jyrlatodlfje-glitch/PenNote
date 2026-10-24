@@ -64,41 +64,54 @@ enum BookScan {
     /// 찍은 방향 그대로 보이게 돌린다: 세로로 들고 찍으면 세로, 가로로 들고 찍으면 가로
     /// (2026-10-24 사용자: "가로로 스캔하면 노트에도 가로로 나오고, 세로로 찍으면 노트에서 세로로 나오게").
     /// 스캔 화면은 세로로만 보여서, 가로로 들고 찍은 사진은 옆으로 누워 나오므로 그것을 바로 세운다.
-    /// 먼저 글자를 읽어 보고(글자가 바로 서면 찍은 방향과 같다), 글자로 못 정하면 들고 있던 방향으로 정한다.
+    /// 들고 있던 방향이 먼저다: 세로로 들고 찍었으면 돌리지 않고, 가로로 들고 찍었는데 사진이 세로로 길면 90° 돌린다.
+    /// (전에는 글자가 "읽히면" 돌리지 않았는데, 애플의 글자 인식은 옆으로 누운 글자도 읽어 내서 돌리지 않는 일이 있었다.
+    ///  2026-10-24 사용자: "가로로 찍은 책이 노트에서는 세로로 나온다는거야. 그래서 볼때마다 내가 가로로 돌려줘야해.")
+    /// 왼쪽·오른쪽 중 어느 쪽으로 돌릴지는 ① 글자가 이어지는 방향 ② 더 잘 읽히는 쪽 ③ 들고 있던 방향 순서로 정한다.
     private static func upright(_ image: CGImage, held: UIDeviceOrientation) -> CGImage {
+        guard held.isLandscape, image.height > image.width else { return image }
+        // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
+        var best: CGImagePropertyOrientation = held == .landscapeLeft ? .left : .right
         // 펼친 책 두 쪽이 한 사진에 들어가 글자가 작으므로 줄이지 않고 읽는다(긴 변 2200픽셀 이하).
-        let upScore = readability(of: image, as: .up)
-        var best = CGImagePropertyOrientation.up
-        if upScore < 150 {
-            let rightScore = readability(of: image, as: .right)
-            let leftScore = readability(of: image, as: .left)
-            let sideScore = max(rightScore, leftScore)
-            if sideScore > 20, sideScore > upScore * 1.5 {
+        let (upScore, direction) = readText(image, as: .up)
+        if direction > 20 {
+            best = .right  // 글자가 아래에서 위로 이어진다 → 시계 반대 방향으로 누움 → 시계 방향으로 돌린다
+        } else if direction < -20 {
+            best = .left   // 글자가 위에서 아래로 이어진다 → 시계 방향으로 누움 → 시계 반대 방향으로 돌린다
+        } else if upScore < 150 {
+            let rightScore = readText(image, as: .right).score
+            let leftScore = readText(image, as: .left).score
+            if max(rightScore, leftScore) > 20, max(rightScore, leftScore) > min(rightScore, leftScore) * 1.5 {
                 best = rightScore > leftScore ? .right : .left
-            } else if upScore < 20, held.isLandscape, image.height > image.width {
-                // 글자가 거의 안 읽힐 때만 들고 있던 방향을 쓴다.
-                // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
-                best = held == .landscapeLeft ? .left : .right
             }
         }
-        guard best != .up else { return image }
         let rotated = CIImage(cgImage: image).oriented(best)
         return CIContext().createCGImage(rotated, from: rotated.extent) ?? image
     }
 
-    /// 그림을 `orientation` 방향으로 놓고 읽었을 때 얼마나 잘 읽히는지: 읽힌 글자 수 × 확신도.
-    /// 옆으로 누운 글자는 거의 읽히지 않는다.
-    private static func readability(of image: CGImage, as orientation: CGImagePropertyOrientation) -> Double {
+    /// 그림을 `orientation` 방향으로 놓고 읽는다.
+    /// `score`: 읽힌 글자 수 × 확신도. `direction`: 세로로 이어지는 글줄의 글자 수 합(아래→위는 +, 위→아래는 −).
+    private static func readText(_ image: CGImage, as orientation: CGImagePropertyOrientation) -> (score: Double, direction: Double) {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["ko-KR", "en-US"]
         request.usesLanguageCorrection = false
         guard (try? VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:]).perform([request])) != nil
-        else { return 0 }
-        return (request.results ?? []).reduce(0.0) { sum, observation in
-            guard let top = observation.topCandidates(1).first else { return sum }
-            return sum + Double(top.confidence) * Double(top.string.count)
+        else { return (0, 0) }
+        var score = 0.0
+        var direction = 0.0
+        for observation in request.results ?? [] {
+            guard let top = observation.topCandidates(1).first else { continue }
+            let count = Double(top.string.count)
+            score += Double(top.confidence) * count
+            // 글줄의 왼쪽 위 → 오른쪽 위가 글자가 이어지는 방향이다. Vision 좌표는 위쪽이 + 다.
+            let dx = Double(observation.topRight.x - observation.topLeft.x) * Double(image.width)
+            let dy = Double(observation.topRight.y - observation.topLeft.y) * Double(image.height)
+            if count >= 3, abs(dy) > abs(dx) * 2 {
+                direction += dy > 0 ? count : -count
+            }
         }
+        return (score, direction)
     }
 
     // MARK: - 두 쪽 나누기

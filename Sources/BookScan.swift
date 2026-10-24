@@ -2,12 +2,13 @@ import CoreImage
 import UIKit
 import Vision
 
-/// 책 스캔 보정: 펼친 두 쪽 나누기 → 손가락 지우기 → 휜 글줄 펴기.
+/// 책 스캔 보정: 글자 방향 바로 세우기 → 펼친 두 쪽 나누기 → 손가락 지우기 → 휜 글줄 펴기.
 /// 학습된 전용 AI가 아니라 화면 분석과 계산으로 하는 근사 보정이라, 결과는 책과 조명에 따라 달라진다.
 enum BookScan {
     /// 한 장을 보정한다. 펼친 책이면 두 장이 되어 나온다.
     static func process(_ page: UIImage) -> [UIImage] {
-        guard let whole = normalized(page) else { return [page] }
+        guard let normal = normalized(page) else { return [page] }
+        let whole = upright(normal)
         return split(whole).map { half in
             let cleaned = removeFingers(from: half) ?? half
             let flat = straightenLines(in: cleaned) ?? cleaned
@@ -58,6 +59,44 @@ enum BookScan {
         }.cgImage
     }
 
+    // MARK: - 글자 방향 바로 세우기
+
+    /// 글자가 바로 읽히는 방향으로 돌린다. 휴대폰을 가로로 들고 찍으면 스캔한 사진이 옆으로 누워 나오기 때문이다.
+    /// 네 방향으로 글자를 읽어 보고 가장 잘 읽히는 방향을 고른다. 글자가 거의 없는 쪽은 그대로 둔다.
+    private static func upright(_ image: CGImage) -> CGImage {
+        // 방향만 정하면 되므로 작게 줄인 그림으로 읽는다.
+        let scale = min(1, 1000 / Double(max(image.width, image.height)))
+        guard let small = Bitmap(image: image, width: max(8, Int(Double(image.width) * scale)),
+                                 height: max(8, Int(Double(image.height) * scale)))?.context.makeImage() else {
+            return image
+        }
+        var best = CGImagePropertyOrientation.up
+        var bestScore = 0.0
+        var upScore = 0.0
+        for orientation in [CGImagePropertyOrientation.up, .right, .left, .down] {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["ko-KR", "en-US"]
+            request.usesLanguageCorrection = false
+            guard (try? VNImageRequestHandler(cgImage: small, orientation: orientation, options: [:]).perform([request])) != nil
+            else { continue }
+            // 읽힌 글자 수에 확신도를 곱해 더한다. 옆으로 누운 글자는 거의 읽히지 않는다.
+            let score = (request.results ?? []).reduce(0.0) { sum, observation in
+                guard let top = observation.topCandidates(1).first else { return sum }
+                return sum + Double(top.confidence) * Double(top.string.count)
+            }
+            if orientation == .up { upScore = score }
+            if score > bestScore {
+                bestScore = score
+                best = orientation
+            }
+        }
+        // 확실히 더 잘 읽힐 때만 돌린다.
+        guard best != .up, bestScore > max(20, upScore * 1.5) else { return image }
+        let rotated = CIImage(cgImage: image).oriented(best)
+        return CIContext().createCGImage(rotated, from: rotated.extent) ?? image
+    }
+
     // MARK: - 두 쪽 나누기
 
     /// 가로로 긴 사진에서 가운데 근처의 어두운 세로 띠(책이 접히는 곳)를 찾아 좌우로 나눈다.
@@ -101,24 +140,20 @@ enum BookScan {
 
     // MARK: - 손가락 지우기
 
-    /// 가장자리에 걸친 살색 덩어리를 손가락으로 보고 종이 색으로 덮는다.
+    /// 손가락을 찾아 종이 색으로 덮는다. 손가락이 가린 글자는 되살릴 수 없다.
+    /// 두 가지로 찾는다: ① 가장자리 근처의 살색 덩어리(종이보다 뚜렷이 붉은 것) ② 애플의 손 인식(손가락 마디 위치).
     private static func removeFingers(from image: CGImage) -> CGImage? {
         let smallWidth = 320
         let smallHeight = max(8, smallWidth * image.height / image.width)
         guard let small = Bitmap(image: image, width: smallWidth, height: smallHeight) else { return nil }
         let count = smallWidth * smallHeight
 
-        var skin = [Bool](repeating: false, count: count)
+        // 종이 색: 밝은 점들의 평균. 누런 종이를 살색으로 보지 않도록 종이의 붉은 정도를 기준으로 삼는다.
         var paper = (r: 0.0, g: 0.0, b: 0.0, n: 0.0)
         for index in 0..<count {
             let pixel = small.data + index * 4
             let r = Double(pixel[0]), g = Double(pixel[1]), b = Double(pixel[2])
-            let cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b
-            let cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b
-            // 누런 종이를 살색으로 잘못 보지 않도록, 붉은 기가 뚜렷한 것만 고른다.
-            skin[index] = r > 80 && r - b > 30 && r > g && g > b
-                && cr >= 140 && cr <= 180 && cb >= 77 && cb <= 127
-            if !skin[index], r + g + b > 540 {
+            if r + g + b > 480 {
                 paper.r += r
                 paper.g += g
                 paper.b += b
@@ -126,8 +161,23 @@ enum BookScan {
             }
         }
         guard paper.n > 0 else { return nil }
+        let paperRedness = (paper.r - paper.b) / paper.n
 
-        // 이어진 덩어리별로, 가장자리에 닿아 있고 크기가 손가락만 한 것만 남긴다.
+        var skin = [Bool](repeating: false, count: count)
+        var warm = [Bool](repeating: false, count: count)
+        for index in 0..<count {
+            let pixel = small.data + index * 4
+            let r = Double(pixel[0]), g = Double(pixel[1]), b = Double(pixel[2])
+            let cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b
+            let cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b
+            warm[index] = r > g && r > b && r - b > paperRedness + 10
+            skin[index] = r > 60 && r > g && r > b && r - b > max(15, paperRedness + 18)
+                && cr >= 135 && cr <= 185 && cb >= 80 && cb <= 135
+        }
+
+        // 이어진 덩어리별로, 가장자리 근처에 있고 크기가 손가락만 한 것만 남긴다.
+        // (책을 잡은 손가락은 쪽의 가장자리에서 들어온다.)
+        let band = max(3, min(smallWidth, smallHeight) * 8 / 100)
         var mask = [UInt8](repeating: 0, count: count)
         var seen = [Bool](repeating: false, count: count)
         var found = false
@@ -141,7 +191,7 @@ enum BookScan {
                 cursor += 1
                 let x = index % smallWidth
                 let y = index / smallWidth
-                if x < 2 || y < 2 || x >= smallWidth - 2 || y >= smallHeight - 2 {
+                if x < band || y < band || x >= smallWidth - band || y >= smallHeight - band {
                     touchesEdge = true
                 }
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -156,17 +206,23 @@ enum BookScan {
                 }
             }
             let share = Double(blob.count) / Double(count)
-            if touchesEdge, share > 0.0015, share < 0.10 {
+            if touchesEdge, share > 0.0008, share < 0.20 {
                 found = true
                 for index in blob {
                     mask[index] = 255
                 }
             }
         }
+        if let hand = handMask(in: image, width: smallWidth, height: smallHeight, warm: warm) {
+            for index in 0..<count where hand[index] != 0 {
+                mask[index] = 255
+                found = true
+            }
+        }
         guard found else { return nil }
 
         // 손가락 테두리와 그림자까지 덮이도록 조금 넓힌다.
-        let radius = 4
+        let radius = 5
         var widened = mask
         for y in 0..<smallHeight {
             for x in 0..<smallWidth where mask[y * smallWidth + x] == 0 {
@@ -205,6 +261,67 @@ enum BookScan {
             kCIInputMaskImageKey: softMask,
         ])
         return CIContext().createCGImage(result, from: source.extent)
+    }
+
+    /// 애플의 손 인식으로 손가락 마디를 찾아, 마디를 잇는 굵은 선으로 손가락 자리를 표시한다.
+    /// 글자를 손가락으로 잘못 보는 일을 막으려고, 표시한 자리의 4분의 1 이상이 붉은 기를 띨 때만 쓴다.
+    private static func handMask(in image: CGImage, width: Int, height: Int, warm: [Bool]) -> [UInt8]? {
+        let request = VNDetectHumanHandPoseRequest()
+        request.maximumHandCount = 4
+        guard (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) != nil,
+              let hands = request.results, !hands.isEmpty,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue),
+              let raw = context.data else { return nil }
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setStrokeColor(gray: 1, alpha: 1)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+
+        let fingers: [[VNHumanHandPoseObservation.JointName]] = [
+            [.thumbTip, .thumbIP, .thumbMP, .thumbCMC],
+            [.indexTip, .indexDIP, .indexPIP, .indexMCP],
+            [.middleTip, .middleDIP, .middlePIP, .middleMCP],
+            [.ringTip, .ringDIP, .ringPIP, .ringMCP],
+            [.littleTip, .littleDIP, .littlePIP, .littleMCP],
+        ]
+        var drew = false
+        for hand in hands {
+            guard let points = try? hand.recognizedPoints(.all) else { continue }
+            // Vision과 CGContext 모두 왼쪽 아래가 원점이라 그대로 그린다.
+            func spot(_ name: VNHumanHandPoseObservation.JointName) -> CGPoint? {
+                guard let point = points[name], point.confidence > 0.5 else { return nil }
+                return CGPoint(x: point.location.x * CGFloat(width), y: point.location.y * CGFloat(height))
+            }
+            // 손가락 굵기: 검지와 새끼 손가락 뿌리 사이의 3분의 1. 모르면 그림 짧은 변의 4%.
+            var thickness = CGFloat(min(width, height)) * 0.04
+            if let index = spot(.indexMCP), let little = spot(.littleMCP) {
+                thickness = max(3, hypot(index.x - little.x, index.y - little.y) / 3)
+            }
+            context.setLineWidth(thickness)
+            for finger in fingers {
+                let spots = finger.compactMap(spot)
+                guard spots.count >= 2 else { continue }
+                context.addLines(between: spots)
+                context.strokePath()
+                drew = true
+            }
+        }
+        guard drew else { return nil }
+
+        let pixels = raw.bindMemory(to: UInt8.self, capacity: width * height)
+        var mask = [UInt8](repeating: 0, count: width * height)
+        var marked = 0
+        var warmMarked = 0
+        for index in 0..<(width * height) where pixels[index] > 127 {
+            mask[index] = 255
+            marked += 1
+            if warm[index] { warmMarked += 1 }
+        }
+        guard marked > 0, Double(warmMarked) / Double(marked) >= 0.25 else { return nil }
+        return mask
     }
 
     // MARK: - 휜 글줄 펴기

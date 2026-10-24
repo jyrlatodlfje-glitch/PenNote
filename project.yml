@@ -57,7 +57,8 @@ targets:
       properties:
         CFBundleDisplayName: PenNote
         WKApplication: true
-        WKCompanionAppBundleIdentifier: com.jykim.pennote
+        # SideStore가 설치할 때 아이폰 앱 번들 ID 끝에 팀 번호를 붙이는데 이 값은 고쳐 주지 않는다(2026-10-24 설치 오류).
+        WKCompanionAppBundleIdentifier: com.jykim.pennote.6JAM4983K9
         NSMicrophoneUsageDescription: 말한 내용을 노트에 받아 적기 위해 마이크를 사용합니다.
         WKBackgroundModes: [audio]
         UIBackgroundModes: [audio]

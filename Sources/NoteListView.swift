@@ -298,8 +298,9 @@ struct NoteBrowser: View {
         let pageWidth = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
         let folderID = folderID
         let bookMode = bookMode
+        let held = DocumentScanner.heldOrientation
         Task.detached {
-            let fixed = bookMode ? pages.flatMap { BookScan.process($0) } : pages
+            let fixed = bookMode ? pages.flatMap { BookScan.process($0, held: held) } : pages
             let note = ScanImporter.makeNote(from: fixed, pageWidth: pageWidth, folderID: folderID)
             await MainActor.run {
                 importing = false

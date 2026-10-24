@@ -8,6 +8,10 @@ struct DocumentScanner: UIViewControllerRepresentable {
 
     static var isSupported: Bool { VNDocumentCameraViewController.isSupported }
 
+    /// 지난 스캔 동안 휴대폰을 주로 어느 방향으로 들고 있었는지.
+    /// 스캔 화면은 세로로만 보여서, 가로로 들고 찍은 사진은 옆으로 누워 나온다. 책 스캔이 이것으로 바로 세운다.
+    static var heldOrientation = UIDeviceOrientation.portrait
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -15,6 +19,7 @@ struct DocumentScanner: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> VNDocumentCameraViewController {
         let scanner = VNDocumentCameraViewController()
         scanner.delegate = context.coordinator
+        context.coordinator.startWatchingOrientation()
         return scanner
     }
 
@@ -22,24 +27,47 @@ struct DocumentScanner: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
         private let parent: DocumentScanner
+        private var timer: Timer?
+        private var counts: [UIDeviceOrientation: Int] = [:]
 
         init(_ parent: DocumentScanner) {
             self.parent = parent
         }
 
+        /// 스캔하는 동안 0.3초마다 휴대폰 방향을 세어 둔다.
+        func startWatchingOrientation() {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            counts = [:]
+            timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+                let orientation = UIDevice.current.orientation
+                guard orientation.isPortrait || orientation.isLandscape else { return }
+                self?.counts[orientation, default: 0] += 1
+            }
+        }
+
+        private func stopWatchingOrientation() {
+            timer?.invalidate()
+            timer = nil
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            DocumentScanner.heldOrientation = counts.max { $0.value < $1.value }?.key ?? .portrait
+        }
+
         func documentCameraViewController(_ controller: VNDocumentCameraViewController,
                                           didFinishWith scan: VNDocumentCameraScan) {
+            stopWatchingOrientation()
             let pages = (0..<scan.pageCount).map { scan.imageOfPage(at: $0) }
             parent.dismiss()
             parent.onScan(pages)
         }
 
         func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+            stopWatchingOrientation()
             parent.dismiss()
         }
 
         func documentCameraViewController(_ controller: VNDocumentCameraViewController,
                                           didFailWithError error: Error) {
+            stopWatchingOrientation()
             parent.dismiss()
         }
     }

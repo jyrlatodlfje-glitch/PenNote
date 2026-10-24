@@ -2,18 +2,18 @@ import CoreImage
 import UIKit
 import Vision
 
-/// 책 스캔 보정: 글자 방향 바로 세우기 → 펼친 두 쪽 나누기 → 손가락 지우기 → 휜 글줄 펴기.
+/// 책 스캔 보정: 방향 바로 세우기 → 손가락 지우기 → 휜 글줄 펴기.
 /// 학습된 전용 AI가 아니라 화면 분석과 계산으로 하는 근사 보정이라, 결과는 책과 조명에 따라 달라진다.
 enum BookScan {
-    /// 한 장을 보정한다. 펼친 책이면 두 장이 되어 나온다.
-    static func process(_ page: UIImage) -> [UIImage] {
+    /// 한 장을 보정한다. 가로로 찍은 펼친 책은 나누지 않고 가로 한 장 그대로 둔다
+    /// (2026-10-24 사용자: "스캔을 가로로 찍으면 노트에 보이는것도 가로로 보고 싶은데").
+    /// `held`: 스캔하는 동안 휴대폰을 들고 있던 방향.
+    static func process(_ page: UIImage, held: UIDeviceOrientation = .portrait) -> [UIImage] {
         guard let normal = normalized(page) else { return [page] }
-        let whole = upright(normal)
-        return split(whole).map { half in
-            let cleaned = removeFingers(from: half) ?? half
-            let flat = straightenLines(in: cleaned) ?? cleaned
-            return UIImage(cgImage: flat)
-        }
+        let whole = upright(normal, held: held)
+        let cleaned = removeFingers(from: whole) ?? whole
+        let flat = straightenLines(in: cleaned) ?? cleaned
+        return [UIImage(cgImage: flat)]
     }
 
     // MARK: - 준비
@@ -61,40 +61,37 @@ enum BookScan {
 
     // MARK: - 글자 방향 바로 세우기
 
-    /// 글자가 바로 읽히는 방향으로 돌린다. 휴대폰을 가로로 들고 찍으면 스캔한 사진이 옆으로 누워 나오기 때문이다.
-    /// 네 방향으로 글자를 읽어 보고 가장 잘 읽히는 방향을 고른다. 글자가 거의 없는 쪽은 그대로 둔다.
-    private static func upright(_ image: CGImage) -> CGImage {
-        // 방향만 정하면 되므로 작게 줄인 그림으로 읽는다.
-        let scale = min(1, 1000 / Double(max(image.width, image.height)))
-        guard let small = Bitmap(image: image, width: max(8, Int(Double(image.width) * scale)),
-                                 height: max(8, Int(Double(image.height) * scale)))?.context.makeImage() else {
-            return image
+    /// 찍은 방향 그대로 보이게 돌린다: 세로로 들고 찍으면 세로, 가로로 들고 찍으면 가로
+    /// (2026-10-24 사용자: "가로로 스캔하면 노트에도 가로로 나오고, 세로로 찍으면 노트에서 세로로 나오게").
+    /// 스캔 화면은 세로로만 보여서, 가로로 들고 찍은 사진은 옆으로 누워 나오므로 그때만 돌린다.
+    /// 왼쪽·오른쪽 중 어느 쪽으로 돌릴지는 글자가 더 잘 읽히는 쪽으로, 글자로 못 정하면 들고 있던 방향으로 정한다.
+    private static func upright(_ image: CGImage, held: UIDeviceOrientation) -> CGImage {
+        guard held.isLandscape, image.height > image.width else { return image }
+        // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
+        var best: CGImagePropertyOrientation = held == .landscapeLeft ? .left : .right
+        // 펼친 책 두 쪽이 한 사진에 들어가 글자가 작으므로 줄이지 않고 읽는다(긴 변 2200픽셀 이하).
+        let rightScore = readability(of: image, as: .right)
+        let leftScore = readability(of: image, as: .left)
+        if max(rightScore, leftScore) > 20, max(rightScore, leftScore) > min(rightScore, leftScore) * 1.5 {
+            best = rightScore > leftScore ? .right : .left
         }
-        var best = CGImagePropertyOrientation.up
-        var bestScore = 0.0
-        var upScore = 0.0
-        for orientation in [CGImagePropertyOrientation.up, .right, .left, .down] {
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["ko-KR", "en-US"]
-            request.usesLanguageCorrection = false
-            guard (try? VNImageRequestHandler(cgImage: small, orientation: orientation, options: [:]).perform([request])) != nil
-            else { continue }
-            // 읽힌 글자 수에 확신도를 곱해 더한다. 옆으로 누운 글자는 거의 읽히지 않는다.
-            let score = (request.results ?? []).reduce(0.0) { sum, observation in
-                guard let top = observation.topCandidates(1).first else { return sum }
-                return sum + Double(top.confidence) * Double(top.string.count)
-            }
-            if orientation == .up { upScore = score }
-            if score > bestScore {
-                bestScore = score
-                best = orientation
-            }
-        }
-        // 확실히 더 잘 읽힐 때만 돌린다.
-        guard best != .up, bestScore > max(20, upScore * 1.5) else { return image }
         let rotated = CIImage(cgImage: image).oriented(best)
         return CIContext().createCGImage(rotated, from: rotated.extent) ?? image
+    }
+
+    /// 그림을 `orientation` 방향으로 놓고 읽었을 때 얼마나 잘 읽히는지: 읽힌 글자 수 × 확신도.
+    /// 옆으로 누운 글자는 거의 읽히지 않는다.
+    private static func readability(of image: CGImage, as orientation: CGImagePropertyOrientation) -> Double {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["ko-KR", "en-US"]
+        request.usesLanguageCorrection = false
+        guard (try? VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:]).perform([request])) != nil
+        else { return 0 }
+        return (request.results ?? []).reduce(0.0) { sum, observation in
+            guard let top = observation.topCandidates(1).first else { return sum }
+            return sum + Double(top.confidence) * Double(top.string.count)
+        }
     }
 
     // MARK: - 두 쪽 나누기

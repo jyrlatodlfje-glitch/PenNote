@@ -219,8 +219,9 @@ struct NoteEditorView: View {
                     return
                 }
                 fixingScan = true
+                let held = DocumentScanner.heldOrientation
                 Task.detached {
-                    let fixed = pages.flatMap { BookScan.process($0) }
+                    let fixed = pages.flatMap { BookScan.process($0, held: held) }
                     await MainActor.run {
                         fixingScan = false
                         page.addImages(fixed)

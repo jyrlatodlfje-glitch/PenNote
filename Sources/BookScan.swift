@@ -16,6 +16,14 @@ enum BookScan {
         return [UIImage(cgImage: flat)]
     }
 
+    /// 문서 스캔용: 찍은 방향 그대로 보이게 돌리기만 한다(손가락 지우기·글줄 펴기는 하지 않음).
+    /// (2026-10-24 사용자: 문서 스캔도 "찍은 방향 그대로"로 — "응.")
+    static func orient(_ page: UIImage, held: UIDeviceOrientation) -> UIImage {
+        guard held.isLandscape, let normal = normalized(page) else { return page }
+        let turned = upright(normal, held: held)
+        return turned === normal ? page : UIImage(cgImage: turned)
+    }
+
     // MARK: - 준비
 
     /// RGBA 8비트 버퍼. 0번 줄이 그림의 맨 윗줄이다.

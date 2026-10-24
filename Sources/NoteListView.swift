@@ -300,7 +300,9 @@ struct NoteBrowser: View {
         let bookMode = bookMode
         let held = DocumentScanner.heldOrientation
         Task.detached {
-            let fixed = bookMode ? pages.flatMap { BookScan.process($0, held: held) } : pages
+            let fixed = bookMode
+                ? pages.flatMap { BookScan.process($0, held: held) }
+                : pages.map { BookScan.orient($0, held: held) }
             let note = ScanImporter.makeNote(from: fixed, pageWidth: pageWidth, folderID: folderID)
             await MainActor.run {
                 importing = false

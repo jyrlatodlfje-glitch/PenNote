@@ -214,14 +214,18 @@ struct NoteEditorView: View {
         }
         .fullScreenCover(isPresented: $showScanner) {
             DocumentScanner { pages in
-                guard bookMode else {
+                let held = DocumentScanner.heldOrientation
+                // 문서 스캔은 세로로 찍었으면 그대로, 가로로 찍었으면 가로로 돌리기만 한다.
+                guard bookMode || held.isLandscape else {
                     page.addImages(pages)
                     return
                 }
+                let bookMode = bookMode
                 fixingScan = true
-                let held = DocumentScanner.heldOrientation
                 Task.detached {
-                    let fixed = pages.flatMap { BookScan.process($0, held: held) }
+                    let fixed = bookMode
+                        ? pages.flatMap { BookScan.process($0, held: held) }
+                        : pages.map { BookScan.orient($0, held: held) }
                     await MainActor.run {
                         fixingScan = false
                         page.addImages(fixed)

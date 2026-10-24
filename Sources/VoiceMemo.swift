@@ -159,14 +159,41 @@ final class PhoneVoiceMemo: ObservableObject {
     }
 }
 
+/// 지금 받아 적는 음성 메모를 한곳에 둔다. 앱 화면의 버튼뿐 아니라
+/// 단축어·Siri(워치 단축어 포함)로도 같은 메모를 시작하고 멈출 수 있게 하기 위해서다.
+final class VoiceMemoCenter: ObservableObject {
+    static let shared = VoiceMemoCenter()
+
+    var store: NoteStore?
+    @Published private(set) var memo: PhoneVoiceMemo?
+    /// 방금 저장한 노트. 목록 화면이 이 노트를 연다.
+    @Published var savedNoteID: UUID?
+    private var folderID: UUID?
+
+    var isRecording: Bool { memo?.isRecording == true }
+
+    func start(folderID: UUID?) {
+        guard memo == nil else { return }
+        self.folderID = folderID
+        let memo = PhoneVoiceMemo()
+        self.memo = memo
+        memo.start()
+    }
+
+    /// 멈추고 새 노트로 저장한다. 받아 적는 중이 아니었으면 화면만 닫고 nil.
+    @discardableResult
+    func stopAndSave() -> Note? {
+        guard let memo else { return nil }
+        self.memo = nil
+        guard let store, let note = memo.stop(into: store, folderID: folderID) else { return nil }
+        savedNoteID = note.id
+        return note
+    }
+}
+
 /// 음성 메모 화면: 말하는 대로 글자가 나오고, [멈추고 저장]을 누르면 새 노트가 된다.
 struct VoiceMemoView: View {
-    let folderID: UUID?
-    var onSaved: (Note) -> Void
-
-    @EnvironmentObject private var store: NoteStore
-    @StateObject private var memo = PhoneVoiceMemo()
-    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var memo: PhoneVoiceMemo
 
     var body: some View {
         VStack(spacing: 16) {
@@ -213,10 +240,7 @@ struct VoiceMemoView: View {
                 .foregroundColor(.secondary)
 
             Button {
-                if let note = memo.stop(into: store, folderID: folderID) {
-                    onSaved(note)
-                }
-                dismiss()
+                VoiceMemoCenter.shared.stopAndSave()
             } label: {
                 Label(memo.isRecording ? "멈추고 저장" : "닫기", systemImage: "stop.circle.fill")
                     .font(.title2)
@@ -228,6 +252,5 @@ struct VoiceMemoView: View {
         }
         .padding()
         .interactiveDismissDisabled()
-        .onAppear { memo.start() }
     }
 }

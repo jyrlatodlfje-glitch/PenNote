@@ -8,9 +8,25 @@ enum Route: Hashable {
 
 struct NoteListView: View {
     @EnvironmentObject private var store: NoteStore
+    @ObservedObject private var voiceMemo = VoiceMemoCenter.shared
     @State private var path: [Route] = []
 
     var body: some View {
+        navigation
+            // 음성 메모는 ＋ 메뉴에서든 단축어(워치 포함)에서든 시작하면 이 화면이 뜨고, 저장하면 그 노트를 연다.
+            .sheet(isPresented: Binding(get: { voiceMemo.memo != nil }, set: { _ in }), onDismiss: {
+                if let id = voiceMemo.savedNoteID {
+                    voiceMemo.savedNoteID = nil
+                    path.append(.note(id))
+                }
+            }) {
+                if let memo = voiceMemo.memo {
+                    VoiceMemoView(memo: memo)
+                }
+            }
+    }
+
+    private var navigation: some View {
         NavigationStack(path: $path) {
             NoteBrowser(folderID: nil, path: $path)
                 .navigationDestination(for: Route.self) { route in
@@ -48,9 +64,6 @@ struct NoteBrowser: View {
     @State private var bookMode = false
     @State private var importing = false
     @State private var importFailed = false
-    @State private var showVoiceMemo = false
-    /// 음성 메모 화면이 닫힌 뒤 열 노트
-    @State private var savedMemoID: UUID?
 
     enum Prompt {
         case newFolder
@@ -114,7 +127,7 @@ struct NoteBrowser: View {
                         Label("노트", systemImage: "note.text")
                     }
                     Button {
-                        showVoiceMemo = true
+                        VoiceMemoCenter.shared.start(folderID: folderID)
                     } label: {
                         Label("음성 메모 (말하면 글자로)", systemImage: "waveform")
                     }
@@ -157,15 +170,6 @@ struct NoteBrowser: View {
                 }
                 .disabled(importing)
             }
-        }
-        .sheet(isPresented: $showVoiceMemo, onDismiss: {
-            if let id = savedMemoID {
-                savedMemoID = nil
-                path.append(.note(id))
-            }
-        }) {
-            VoiceMemoView(folderID: folderID) { savedMemoID = $0.id }
-                .environmentObject(store)
         }
         .fullScreenCover(isPresented: $showScanner) {
             DocumentScanner { pages in

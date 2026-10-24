@@ -1,3 +1,4 @@
+import CoreMotion
 import SwiftUI
 import VisionKit
 
@@ -27,28 +28,34 @@ struct DocumentScanner: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
         private let parent: DocumentScanner
-        private var timer: Timer?
+        private let motion = CMMotionManager()
         private var counts: [UIDeviceOrientation: Int] = [:]
 
         init(_ parent: DocumentScanner) {
             self.parent = parent
         }
 
-        /// 스캔하는 동안 0.3초마다 휴대폰 방향을 세어 둔다.
+        /// 스캔하는 동안 0.3초마다 휴대폰이 어느 쪽으로 기울어 있는지 세어 둔다.
+        /// 화면 방향 표시(UIDevice.orientation)는 책상 위 책을 내려다보며 찍으면 "바닥을 향함"이 되고,
+        /// 화면 세로 고정을 켜 두면 세로로만 나와서 쓰지 않는다. 대신 중력 방향을 직접 본다.
         func startWatchingOrientation() {
-            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             counts = [:]
-            timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-                let orientation = UIDevice.current.orientation
-                guard orientation.isPortrait || orientation.isLandscape else { return }
-                self?.counts[orientation, default: 0] += 1
+            guard motion.isDeviceMotionAvailable else { return }
+            motion.deviceMotionUpdateInterval = 0.3
+            motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+                guard let self, let gravity = data?.gravity else { return }
+                // 휴대폰 화면 기준: x는 오른쪽, y는 위쪽. 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 오른쪽이 위가 되어 x가 음수.
+                let x = gravity.x, y = gravity.y
+                if abs(x) > abs(y) + 0.05 {
+                    self.counts[x < 0 ? .landscapeLeft : .landscapeRight, default: 0] += 1
+                } else if abs(y) > abs(x) + 0.05 {
+                    self.counts[.portrait, default: 0] += 1
+                }
             }
         }
 
         private func stopWatchingOrientation() {
-            timer?.invalidate()
-            timer = nil
-            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            motion.stopDeviceMotionUpdates()
             DocumentScanner.heldOrientation = counts.max { $0.value < $1.value }?.key ?? .portrait
         }
 

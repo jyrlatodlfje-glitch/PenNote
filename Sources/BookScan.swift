@@ -63,18 +63,25 @@ enum BookScan {
 
     /// 찍은 방향 그대로 보이게 돌린다: 세로로 들고 찍으면 세로, 가로로 들고 찍으면 가로
     /// (2026-10-24 사용자: "가로로 스캔하면 노트에도 가로로 나오고, 세로로 찍으면 노트에서 세로로 나오게").
-    /// 스캔 화면은 세로로만 보여서, 가로로 들고 찍은 사진은 옆으로 누워 나오므로 그때만 돌린다.
-    /// 왼쪽·오른쪽 중 어느 쪽으로 돌릴지는 글자가 더 잘 읽히는 쪽으로, 글자로 못 정하면 들고 있던 방향으로 정한다.
+    /// 스캔 화면은 세로로만 보여서, 가로로 들고 찍은 사진은 옆으로 누워 나오므로 그것을 바로 세운다.
+    /// 먼저 글자를 읽어 보고(글자가 바로 서면 찍은 방향과 같다), 글자로 못 정하면 들고 있던 방향으로 정한다.
     private static func upright(_ image: CGImage, held: UIDeviceOrientation) -> CGImage {
-        guard held.isLandscape, image.height > image.width else { return image }
-        // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
-        var best: CGImagePropertyOrientation = held == .landscapeLeft ? .left : .right
         // 펼친 책 두 쪽이 한 사진에 들어가 글자가 작으므로 줄이지 않고 읽는다(긴 변 2200픽셀 이하).
-        let rightScore = readability(of: image, as: .right)
-        let leftScore = readability(of: image, as: .left)
-        if max(rightScore, leftScore) > 20, max(rightScore, leftScore) > min(rightScore, leftScore) * 1.5 {
-            best = rightScore > leftScore ? .right : .left
+        let upScore = readability(of: image, as: .up)
+        var best = CGImagePropertyOrientation.up
+        if upScore < 150 {
+            let rightScore = readability(of: image, as: .right)
+            let leftScore = readability(of: image, as: .left)
+            let sideScore = max(rightScore, leftScore)
+            if sideScore > 20, sideScore > upScore * 1.5 {
+                best = rightScore > leftScore ? .right : .left
+            } else if upScore < 20, held.isLandscape, image.height > image.width {
+                // 글자가 거의 안 읽힐 때만 들고 있던 방향을 쓴다.
+                // 휴대폰 위쪽이 왼쪽으로 가게 들면(landscapeLeft) 사진 속 책은 시계 방향으로 누워 있다.
+                best = held == .landscapeLeft ? .left : .right
+            }
         }
+        guard best != .up else { return image }
         let rotated = CIImage(cgImage: image).oriented(best)
         return CIContext().createCGImage(rotated, from: rotated.extent) ?? image
     }

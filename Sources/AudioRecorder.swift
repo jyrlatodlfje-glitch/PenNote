@@ -179,7 +179,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
         try session.setActive(true)
     }
 
-    private func reload() {
+    /// 녹음 목록을 다시 읽는다. 음성 입력이 남긴 소리 파일을 목록에 보이게 할 때도 부른다.
+    func reload() {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         recordings = files
             .filter { ["m4a", "mp3", "wav", "aac", "caf", "mp4"].contains($0.pathExtension.lowercased()) }

@@ -82,6 +82,12 @@ struct NoteEditorView: View {
 
     /// 음성 입력 중 현재 구간에서 페이지에 넣은 글. 인식이 고쳐질 때마다 이 부분을 바꿔 쓴다.
     @State private var dictatedSegment = ""
+    /// 화면이 꺼진 동안 확정된 음성 입력 글. 화면이 켜지면 종이에 넣는다.
+    @State private var heldText = ""
+    /// 화면이 꺼진 동안 말하는 중이던 글
+    @State private var heldPartial = ""
+    /// 음성 입력을 멈춘 뒤 녹음 파일로 빠진 말을 다시 받아 적는 중
+    @State private var refining = false
 
     @State private var note: Note
     @State private var tool = PageTool.select
@@ -115,7 +121,19 @@ struct NoteEditorView: View {
             if audio.isRecording {
                 recordingBanner
             }
-            TextField("제목", text: $titleText)
+            if refining {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("녹음으로 빠진 말이 있는지 확인하는 중")
+                }
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(Color(.secondarySystemBackground))
+            }
+            // 제목은 비워 둬도 된다. 비워 두면 목록에 만든 날짜·시각이 제목으로 나온다.
+            TextField(note.dateTitle.map { "제목 (비워 두면 \($0))" } ?? "제목", text: $titleText)
                 .font(.title3.weight(.semibold))
                 .submitLabel(.done)
                 .focused($titleFocused)
@@ -151,6 +169,9 @@ struct NoteEditorView: View {
                             .frame(height: landscape ? nil : 200)
                         keyRow
                     }
+                } else if keyboardBarVisible {
+                    Divider()
+                    keyboardBar
                 } else if landscape {
                     Color(.secondarySystemBackground)
                 }
@@ -173,13 +194,10 @@ struct NoteEditorView: View {
         .onChange(of: titleText) { name in
             page.setName(name)
         }
-        .onAppear {
-            // 새 노트는 제목부터 적도록 제목란에 커서를 둔다.
-            if note.name == nil && note.texts.isEmpty && note.drawing.isEmpty && note.images.isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    titleFocused = true
-                }
-            }
+        // 2026-11-15: 새 노트를 열 때 제목란에 커서를 두던 것을 뺐다. 열면 바로 종이에 쓴다.
+        // 화면이 꺼진 동안 모아 둔 음성 입력 글을, 화면이 다시 켜지면 종이에 넣는다.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            flushHeld()
         }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
@@ -259,7 +277,7 @@ struct NoteEditorView: View {
             }
         }
         .onDisappear {
-            dictation.stop()
+            stopDictation()
         }
         .onChange(of: padVisible) { _ in
             // 글씨 칸이 사라지면 칸에 있던 글씨도 없어지므로, 이어 쓰던 글을 확정한다.
@@ -442,12 +460,9 @@ struct NoteEditorView: View {
                 endSession()
                 recognizer.language = recognizer.language.next
             }
-            Button(action: toggleDictation) {
-                Image(systemName: dictation.isListening ? "stop.fill" : "mic.fill")
-                    .foregroundColor(dictation.isListening ? .red : .accentColor)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
+            micButton
+            // 2026-11-15 키보드를 ⋯ 메뉴에서 꺼내 마이크 옆에 둠. 다시 글씨 칸으로는 keyboardBar의 버튼.
+            key(icon: "keyboard") { useKeyboard = true }
             key(icon: "scribble") { pad.undoLastStroke() }
             key(icon: "space") { type(" ") }
             RepeatKey(icon: "delete.left") {
@@ -457,6 +472,37 @@ struct NoteEditorView: View {
         }
         .frame(height: 48)
         .background(Color(.systemBackground))
+    }
+
+    private var micButton: some View {
+        Button(action: toggleDictation) {
+            Image(systemName: dictation.isListening ? "stop.fill" : "mic.fill")
+                .foregroundColor(dictation.isListening ? .red : .accentColor)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+    }
+
+    /// 키보드로 쓰는 동안 아이폰 키보드 바로 위에 붙는 줄: 글씨 칸으로 돌아가기, 마이크.
+    private var keyboardBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                useKeyboard = false
+            } label: {
+                Label("글씨 칸으로", systemImage: "pencil.line")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            micButton
+        }
+        .font(.subheadline)
+        .frame(height: 44)
+        .frame(maxWidth: landscape ? CGFloat(220) : CGFloat.infinity)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    private var keyboardBarVisible: Bool {
+        tool == .select && useKeyboard && !titleFocused
     }
 
     private func key(text: String? = nil, icon: String? = nil, action: @escaping () -> Void) -> some View {
@@ -485,8 +531,23 @@ struct NoteEditorView: View {
         endSession()
         alternatives = []
         dictatedSegment = ""
-        dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR") { text, segmentEnded in
+        heldText = ""
+        heldPartial = ""
+        dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR",
+                        recordInto: note.id) { text, segmentEnded in
             guard !text.isEmpty else { return }
+            // 화면이 꺼져 있으면 종이의 커서가 풀려 글을 넣지 못한다(2026-11-15 실기기: 꺼진 동안 글 0개).
+            // 그동안은 모아 두었다가 화면이 켜지면 한꺼번에 넣는다.
+            if UIApplication.shared.applicationState != .active {
+                if segmentEnded {
+                    heldText += text + " "
+                    heldPartial = ""
+                } else {
+                    heldPartial = text
+                }
+                return
+            }
+            flushHeld()
             if !page.replaceBeforeCursor(dictatedSegment, with: text) {
                 page.insert(text)
             }
@@ -498,10 +559,46 @@ struct NoteEditorView: View {
         }
     }
 
+    /// 화면이 꺼진 동안 모아 둔 글을 종이에 넣는다.
+    private func flushHeld() {
+        let held = heldText + heldPartial
+        guard !held.isEmpty else { return }
+        // 화면이 꺼지기 직전에 넣던 '말하는 중' 글은 모아 둔 글에 다시 들어 있으므로 지운다.
+        if !dictatedSegment.isEmpty {
+            _ = page.replaceBeforeCursor(dictatedSegment, with: "")
+        }
+        page.insert(held)
+        dictatedSegment = heldPartial
+        heldText = ""
+        heldPartial = ""
+    }
+
     private func stopDictation() {
         guard dictation.isListening else { return }
+        flushHeld()
+        let live = dictation.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let recording = dictation.recordingURL
+        let locale = dictation.locale
+        let noteID = note.id
+        let page = self.page
+        let store = self.store
         dictation.stop()
         dictatedSegment = ""
+        audio.reload()
+        guard let recording else { return }
+        // 실시간으로 못 받은 말이 있으면(화면이 꺼진 동안 인식이 멈춘 경우 등) 녹음 파일로 다시 받아 적어 덧붙인다.
+        refining = true
+        LiveTranscriber.transcribeFile(recording, locale: locale) { result in
+            refining = false
+            let result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Double(result.count) > Double(live.count) * 1.2 + 20 else { return }
+            let block = "[녹음으로 다시 받아 적은 글]\n" + result
+            if page.isAttached {
+                page.appendBlock(block)
+            } else {
+                store.appendText(block, to: noteID)
+            }
+        }
     }
 
     private func exportText() {

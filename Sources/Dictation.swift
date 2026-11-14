@@ -1,22 +1,52 @@
 import AVFoundation
 import Speech
 
-/// 말하는 대로 글자를 내보내는 실시간 음성 입력.
+/// 말하는 대로 글자를 내보내는 실시간 음성 입력 (노트 화면 글씨 칸 아래의 마이크).
+/// 화면이 꺼져도 계속 듣는다(백그라운드 오디오). 2026-11-15부터 소리를 노트의 녹음 목록에 파일로도 남겨,
+/// 실시간으로 못 받은 말이 있으면 멈춘 뒤 그 파일로 다시 받아 적을 수 있게 한다.
 final class Dictation: ObservableObject {
     @Published private(set) var isListening = false
     @Published var errorMessage: String?
+
+    /// 이번에 듣는 동안 받아 적은 글 전체 (말하는 중인 부분 포함)
+    private(set) var transcript = ""
+    /// 이번에 듣는 동안 남긴 소리 파일
+    private(set) var recordingURL: URL?
+    private(set) var locale = "ko-KR"
 
     private let engine = AVAudioEngine()
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    private var file: AVAudioFile?
     private var onText: ((String, Bool) -> Void)?
     private var lastEndedText = ""
+    private var endedTranscript = ""
     private var taskStarted = Date()
     private var quickFailures = 0
+    /// 소리 스레드와 화면 스레드가 함께 `request`를 쓴다.
+    private let lock = NSLock()
+    private var observer: NSObjectProtocol?
+
+    init() {
+        // 전화가 오면 마이크가 멈춘다. 전화가 끝나면 다시 듣는다.
+        observer = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification,
+                                                          object: nil, queue: .main) { [weak self] notification in
+            guard let self, self.isListening,
+                  let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+            try? AVAudioSession.sharedInstance().setActive(true)
+            try? self.engine.start()
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
 
     /// `onText(글, 구간종료)`: 같은 구간의 글은 말하는 동안 계속 고쳐져서 다시 온다.
-    func start(locale: String, onText: @escaping (String, Bool) -> Void) {
+    /// `recordInto`: 소리 파일을 남길 노트. 파일은 그 노트의 녹음 목록에 들어간다.
+    func start(locale: String, recordInto noteID: UUID?, onText: @escaping (String, Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             AVAudioSession.sharedInstance().requestRecordPermission { granted in
                 DispatchQueue.main.async {
@@ -24,7 +54,7 @@ final class Dictation: ObservableObject {
                         self?.errorMessage = "설정 > PenNote에서 마이크와 음성 인식을 허용해 주세요."
                         return
                     }
-                    self?.begin(locale: locale, onText: onText)
+                    self?.begin(locale: locale, noteID: noteID, onText: onText)
                 }
             }
         }
@@ -35,15 +65,25 @@ final class Dictation: ObservableObject {
         isListening = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        file = nil // 파일을 닫는다
+        lock.lock()
+        let request = self.request
+        self.request = nil
+        lock.unlock()
         request?.endAudio()
         task?.cancel()
-        request = nil
         task = nil
         onText = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    private func begin(locale: String, onText: @escaping (String, Bool) -> Void) {
+    private var currentRequest: SFSpeechAudioBufferRecognitionRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return request
+    }
+
+    private func begin(locale: String, noteID: UUID?, onText: @escaping (String, Bool) -> Void) {
         guard !isListening else { return }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else {
             errorMessage = "이 언어의 음성 인식을 지금 사용할 수 없습니다."
@@ -56,58 +96,86 @@ final class Dictation: ObservableObject {
 
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
+            file = nil
+            recordingURL = nil
+            if let noteID {
+                // 파일을 못 만들어도 받아 적기는 그대로 한다.
+                file = try? VoiceMemoSaver.openFile(at: VoiceMemoSaver.newRecordingURL(noteID: noteID, date: Date()),
+                                                    format: format)
+                recordingURL = file?.url
+            }
             input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-                self?.request?.append(buffer)
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                guard let self else { return }
+                try? self.file?.write(from: buffer)
+                self.currentRequest?.append(buffer)
             }
             engine.prepare()
             try engine.start()
         } catch {
+            file = nil
             errorMessage = "음성 입력을 시작하지 못했습니다: \(error.localizedDescription)"
             return
         }
         self.recognizer = recognizer
+        self.locale = locale
         self.onText = onText
         lastEndedText = ""
+        endedTranscript = ""
+        transcript = ""
         quickFailures = 0
         isListening = true
         beginTask()
     }
 
     private func beginTask() {
-        guard let recognizer else { return }
+        guard let recognizer, isListening else { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
+        lock.lock()
         self.request = request
+        lock.unlock()
         taskStarted = Date()
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
-                guard let self, self.isListening, self.request === request else { return }
+                guard let self, self.isListening, self.currentRequest === request else { return }
                 if let result {
                     let text = result.bestTranscription.formattedString
                     let ended = result.speechRecognitionMetadata != nil || result.isFinal
                     if !ended {
+                        self.transcript = Self.join(self.endedTranscript, text)
                         self.onText?(text, false)
                     } else if text != self.lastEndedText {
                         self.lastEndedText = text
+                        self.endedTranscript = Self.join(self.endedTranscript, text)
+                        self.transcript = self.endedTranscript
                         self.onText?(text, true)
                     }
                 }
                 guard result?.isFinal == true || error != nil else { return }
                 // 인식 작업은 침묵이나 시간 제한으로 끝나므로, 듣는 중이면 이어서 다시 시작한다.
+                // 계속 실패해도 듣기(녹음)는 멈추지 않고 잠깐 쉬었다가 다시 시도한다 — 놓친 말은 멈춘 뒤 녹음 파일로 채운다.
                 self.quickFailures = Date().timeIntervalSince(self.taskStarted) < 1 ? self.quickFailures + 1 : 0
-                if self.quickFailures >= 3 {
-                    self.stop()
-                    self.errorMessage = "음성 인식이 계속 중단됩니다. \(error?.localizedDescription ?? "")"
-                } else {
-                    self.lastEndedText = ""
+                self.lastEndedText = ""
+                if self.quickFailures < 3 {
                     self.beginTask()
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                        guard let self, self.isListening, self.currentRequest === request else { return }
+                        self.beginTask()
+                    }
                 }
             }
         }
+    }
+
+    private static func join(_ first: String, _ second: String) -> String {
+        if first.isEmpty { return second }
+        if second.isEmpty { return first }
+        return first + " " + second
     }
 }

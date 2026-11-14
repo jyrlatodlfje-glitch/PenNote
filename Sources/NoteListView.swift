@@ -77,10 +77,27 @@ struct NoteBrowser: View {
             case .renameNote: return "노트 제목"
             }
         }
+
+        /// 입력 칸이 비었을 때 보이는 글
+        var placeholder: String {
+            switch self {
+            case .renameNote(let note):
+                return "비워 두면 " + (note.dateTitle ?? "본문 첫 줄")
+            default:
+                return "이름"
+            }
+        }
     }
 
-    private var notes: [Note] { store.notes(in: folderID) }
-    private var showsFolders: Bool { folderID == nil && !store.folders.isEmpty }
+    /// 검색어. 있으면 폴더와 상관없이 모든 노트에서 찾는다.
+    @State private var query = ""
+    private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
+    private var searching: Bool { !trimmedQuery.isEmpty }
+
+    private var notes: [Note] {
+        searching ? store.notes.filter { $0.matches(trimmedQuery) } : store.notes(in: folderID)
+    }
+    private var showsFolders: Bool { folderID == nil && !store.folders.isEmpty && !searching }
 
     var body: some View {
         List {
@@ -106,11 +123,13 @@ struct NoteBrowser: View {
         }
         .overlay {
             if notes.isEmpty && !showsFolders {
-                Text("오른쪽 위 + 를 눌러 노트를 만드세요")
+                Text(searching ? "찾는 글이 든 노트가 없습니다" : "오른쪽 위 + 를 눌러 노트를 만드세요")
                     .foregroundColor(.secondary)
             }
         }
         .navigationTitle(store.folders.first { $0.id == folderID }?.name ?? "펜노트")
+        // 2026-11-15: 모든 노트 검색 (제목·글자·만다라트·마인드맵. 손필기 그림은 못 찾음)
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "제목·글자 검색")
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 if folderID == nil {
@@ -192,7 +211,7 @@ struct NoteBrowser: View {
             Button("확인", role: .cancel) {}
         }
         .alert(prompt?.title ?? "", isPresented: $showPrompt) {
-            TextField("이름", text: $promptText)
+            TextField(prompt?.placeholder ?? "이름", text: $promptText)
             Button("저장") { confirmPrompt() }
             Button("취소", role: .cancel) {}
         }
@@ -231,16 +250,34 @@ struct NoteBrowser: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(note.title)
                         .lineLimit(1)
+                    if searching, let snippet = note.snippet(for: trimmedQuery) {
+                        Text(snippet)
+                            .font(.caption)
+                            .foregroundColor(.accentColor)
+                            .lineLimit(1)
+                    }
                     Text(note.modified, style: .date)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                Spacer(minLength: 8)
+                // 2026-11-15: 제목은 목록에서 넣는다. 안 넣으면 만든 날짜·시각이 제목.
+                Button {
+                    ask(.renameNote(note), text: note.name ?? "")
+                } label: {
+                    Image(systemName: "pencil")
+                        .foregroundColor(.accentColor)
+                        .padding(8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("제목 수정")
             }
         }
         .draggable(note.id.uuidString)
         .contextMenu {
             Button {
-                ask(.renameNote(note), text: note.title)
+                ask(.renameNote(note), text: note.name ?? "")
             } label: {
                 Label("제목 수정", systemImage: "pencil")
             }
@@ -262,7 +299,7 @@ struct NoteBrowser: View {
         }
         .swipeActions(edge: .leading) {
             Button("제목 수정") {
-                ask(.renameNote(note), text: note.title)
+                ask(.renameNote(note), text: note.name ?? "")
             }
             .tint(.blue)
         }

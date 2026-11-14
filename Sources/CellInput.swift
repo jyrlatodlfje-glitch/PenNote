@@ -248,7 +248,7 @@ struct CellInputPanel: View {
         endSession()
         alternatives = []
         dictatedSegment = ""
-        dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR") { spoken, segmentEnded in
+        dictation.start(locale: recognizer.language == .english ? "en-US" : "ko-KR", recordInto: nil) { spoken, segmentEnded in
             guard !spoken.isEmpty else { return }
             replaceEnd(dictatedSegment, with: spoken)
             dictatedSegment = spoken

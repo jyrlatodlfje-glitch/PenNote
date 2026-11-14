@@ -4,6 +4,8 @@ import UIKit
 final class PageController: ObservableObject {
     @Published fileprivate(set) var hasSelection = false
     fileprivate weak var view: PageCanvasView?
+    /// 노트 화면이 아직 열려 있는지. 닫혔으면 글은 노트 저장소로 직접 넣는다.
+    var isAttached: Bool { view != nil }
 
     func insert(_ string: String) { view?.insertText(string) }
     func appendBlock(_ string: String) { view?.appendBlock(string) }

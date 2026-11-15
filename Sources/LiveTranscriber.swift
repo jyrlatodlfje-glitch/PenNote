@@ -16,6 +16,8 @@ final class LiveTranscriber {
     private var running = false
     private var taskStarted = Date()
     private var quickFailures = 0
+    /// 지금 작업에서 마지막으로 들은 글. 작업이 끝날 때 빈 글이 와도 이 글을 지키려고 (2026-11-15).
+    private var taskHeard = ""
     /// `append`는 소리 스레드에서 불린다.
     private let lock = NSLock()
 
@@ -97,12 +99,15 @@ final class LiveTranscriber {
         lock.unlock()
         taskStarted = Date()
         let base = finished
+        taskHeard = ""
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
                 // 언어를 바꾸며 버린 작업의 늦은 결과는 받지 않는다. 멈춘 뒤의 마지막 결과는 받는다.
                 guard let self, self.currentRequest === request || !self.running else { return }
                 if let result {
-                    self.text = Self.join(base, result.bestTranscription.formattedString)
+                    let heard = result.bestTranscription.formattedString
+                    if !heard.isEmpty { self.taskHeard = heard }
+                    self.text = Self.join(base, self.taskHeard)
                     self.onText?(self.text)
                 }
                 guard result?.isFinal == true || error != nil else { return }

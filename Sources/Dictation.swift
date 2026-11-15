@@ -22,6 +22,8 @@ final class Dictation: ObservableObject {
     private var onText: ((String, Bool) -> Void)?
     private var lastEndedText = ""
     private var endedTranscript = ""
+    /// 지금 인식 작업에서 말하는 중인(아직 구간이 닫히지 않은) 글
+    private var pendingPartial = ""
     private var taskStarted = Date()
     private var quickFailures = 0
     /// 소리 스레드와 화면 스레드가 함께 `request`를 쓴다.
@@ -122,6 +124,7 @@ final class Dictation: ObservableObject {
         self.onText = onText
         lastEndedText = ""
         endedTranscript = ""
+        pendingPartial = ""
         transcript = ""
         quickFailures = 0
         isListening = true
@@ -144,19 +147,37 @@ final class Dictation: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.isListening, self.currentRequest === request else { return }
                 if let result {
-                    let text = result.bestTranscription.formattedString
+                    var text = result.bestTranscription.formattedString
                     let ended = result.speechRecognitionMetadata != nil || result.isFinal
+                    // 끝날 때 빈 글이 오면(화면이 꺼질 때 등) 마지막에 들은 글을 쓴다.
+                    if ended && text.isEmpty {
+                        text = self.pendingPartial
+                    }
                     if !ended {
+                        if !text.isEmpty { self.pendingPartial = text }
                         self.transcript = Self.join(self.endedTranscript, text)
                         self.onText?(text, false)
-                    } else if text != self.lastEndedText {
-                        self.lastEndedText = text
-                        self.endedTranscript = Self.join(self.endedTranscript, text)
-                        self.transcript = self.endedTranscript
-                        self.onText?(text, true)
+                    } else {
+                        self.pendingPartial = ""
+                        if !text.isEmpty && text != self.lastEndedText {
+                            self.lastEndedText = text
+                            self.endedTranscript = Self.join(self.endedTranscript, text)
+                            self.transcript = self.endedTranscript
+                            self.onText?(text, true)
+                        }
                     }
                 }
                 guard result?.isFinal == true || error != nil else { return }
+                // 작업이 오류로 끝나 구간이 닫히지 않았으면 마지막에 들은 글로 닫는다.
+                // 안 닫으면 다음 작업의 글이 그 자리를 덮어쓴다 (2026-11-15 실기기: 화면을 끄고 켜니 "1,2,3은 없어지고, 4,5,6만").
+                if !self.pendingPartial.isEmpty {
+                    let closing = self.pendingPartial
+                    self.pendingPartial = ""
+                    self.lastEndedText = closing
+                    self.endedTranscript = Self.join(self.endedTranscript, closing)
+                    self.transcript = self.endedTranscript
+                    self.onText?(closing, true)
+                }
                 // 인식 작업은 침묵이나 시간 제한으로 끝나므로, 듣는 중이면 이어서 다시 시작한다.
                 // 계속 실패해도 듣기(녹음)는 멈추지 않고 잠깐 쉬었다가 다시 시도한다 — 놓친 말은 멈춘 뒤 녹음 파일로 채운다.
                 self.quickFailures = Date().timeIntervalSince(self.taskStarted) < 1 ? self.quickFailures + 1 : 0

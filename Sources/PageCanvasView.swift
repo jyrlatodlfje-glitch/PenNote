@@ -348,6 +348,15 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         textViewDidChange(textView)
     }
 
+    /// 키보드로 쓰기 시작: 고른 글상자가 없으면 지금 보이는 곳에 만들고, 아이폰 키보드를 띄운다.
+    func focusForKeyboard() {
+        if selectedTextView == nil {
+            createText(at: CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight))
+        }
+        applyInputView()
+        selectedTextView?.becomeFirstResponder()
+    }
+
     /// 커서 앞에 있는 글. 선택된 글상자가 없으면 빈 문자열.
     func textBeforeCursor() -> String {
         guard let textView = selectedTextView else { return "" }

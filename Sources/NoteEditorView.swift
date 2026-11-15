@@ -334,7 +334,7 @@ struct NoteEditorView: View {
                     bookMode = true
                     showScanner = true
                 } label: {
-                    Label("책 스캔해서 넣기 (곡면·손가락 보정)", systemImage: "book")
+                    Label("책 스캔해서 넣기", systemImage: "book")
                 }
             }
             Picker("속지", selection: Binding(
@@ -347,7 +347,11 @@ struct NoteEditorView: View {
             }
             Toggle("직선 반듯하게 고치기", isOn: $straightenLines)
             Button {
-                useKeyboard.toggle()
+                if useKeyboard {
+                    useKeyboard = false
+                } else {
+                    startKeyboard()
+                }
             } label: {
                 Label(useKeyboard ? "글씨 칸으로 입력" : "키보드로 입력",
                       systemImage: useKeyboard ? "pencil.line" : "keyboard")
@@ -462,7 +466,7 @@ struct NoteEditorView: View {
             }
             micButton
             // 2026-11-15 키보드를 ⋯ 메뉴에서 꺼내 마이크 옆에 둠. 다시 글씨 칸으로는 keyboardBar의 버튼.
-            key(icon: "keyboard") { useKeyboard = true }
+            key(icon: "keyboard") { startKeyboard() }
             key(icon: "scribble") { pad.undoLastStroke() }
             key(icon: "space") { type(" ") }
             RepeatKey(icon: "delete.left") {
@@ -499,6 +503,16 @@ struct NoteEditorView: View {
         .frame(height: 44)
         .frame(maxWidth: landscape ? CGFloat(220) : CGFloat.infinity)
         .background(Color(.secondarySystemBackground))
+    }
+
+    /// 키보드로 바꾼다. 글씨 칸이 사라지며 화면이 다시 짜이는 동안 키보드가 떴다가 바로 닫혀서
+    /// (2026-11-15 실기기 "올라왔다가 바로 내려가서"), 화면이 다 짜인 뒤에 글상자를 고르고 키보드를 다시 띄운다.
+    private func startKeyboard() {
+        useKeyboard = true
+        let page = self.page
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            page.focusForKeyboard()
+        }
     }
 
     private var keyboardBarVisible: Bool {
@@ -563,14 +577,24 @@ struct NoteEditorView: View {
     private func flushHeld() {
         let held = heldText + heldPartial
         guard !held.isEmpty else { return }
-        // 화면이 꺼지기 직전에 넣던 '말하는 중' 글은 모아 둔 글에 다시 들어 있으므로 지운다.
-        if !dictatedSegment.isEmpty {
-            _ = page.replaceBeforeCursor(dictatedSegment, with: "")
+        // 화면이 꺼지기 직전에 넣던 '말하는 중' 글이 모아 둔 글의 앞부분과 같을 때만 그 자리를 바꿔 쓴다.
+        // 다르면(인식 작업이 새로 시작되어 4,5,6만 모인 경우) 앞 글은 그대로 두고 뒤에 붙인다.
+        // (2026-11-15 실기기: 예전에는 늘 지워서 "1,2,3은 없어지고, 4,5,6만" 남았음)
+        if !dictatedSegment.isEmpty,
+           Self.letters(held).hasPrefix(Self.letters(dictatedSegment)),
+           page.replaceBeforeCursor(dictatedSegment, with: held) {
+            // 바꿔 씀
+        } else {
+            page.insert(dictatedSegment.isEmpty ? held : " " + held)
         }
-        page.insert(held)
         dictatedSegment = heldPartial
         heldText = ""
         heldPartial = ""
+    }
+
+    /// 글자와 숫자만 남긴다. 쉼표·띄어쓰기가 고쳐져도 같은 말인지 견주려고.
+    private static func letters(_ text: String) -> String {
+        String(text.filter { $0.isLetter || $0.isNumber })
     }
 
     private func stopDictation() {

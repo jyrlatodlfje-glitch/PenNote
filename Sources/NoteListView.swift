@@ -148,7 +148,7 @@ struct NoteBrowser: View {
                     Button {
                         VoiceMemoCenter.shared.start(folderID: folderID)
                     } label: {
-                        Label("음성 메모 (말하면 글자로)", systemImage: "waveform")
+                        Label("음성 메모", systemImage: "waveform")
                     }
                     Button {
                         path.append(.note(store.addNote(in: folderID, whiteboard: true).id))
@@ -181,7 +181,7 @@ struct NoteBrowser: View {
                             bookMode = true
                             showScanner = true
                         } label: {
-                            Label("책 스캔 (곡면·손가락 보정)", systemImage: "book")
+                            Label("책 스캔", systemImage: "book")
                         }
                     }
                 } label: {

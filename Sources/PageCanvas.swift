@@ -8,6 +8,7 @@ final class PageController: ObservableObject {
     var isAttached: Bool { view != nil }
 
     func insert(_ string: String) { view?.insertText(string) }
+    func focusForKeyboard() { view?.focusForKeyboard() }
     func appendBlock(_ string: String) { view?.appendBlock(string) }
     func textBeforeCursor() -> String { view?.textBeforeCursor() ?? "" }
     func backspace() { view?.backspace() }

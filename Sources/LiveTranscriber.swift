@@ -18,6 +18,9 @@ final class LiveTranscriber {
     private var quickFailures = 0
     /// 지금 작업에서 마지막으로 들은 글. 작업이 끝날 때 빈 글이 와도 이 글을 지키려고 (2026-11-15).
     private var taskHeard = ""
+    /// 지금 작업에서 이미 굳힌 글(앞 작업들 + 이 작업 안에서 쉼 전에 들은 글)
+    private var taskBase = ""
+    private var lastResultAt = Date()
     /// `append`는 소리 스레드에서 불린다.
     private let lock = NSLock()
 
@@ -98,7 +101,8 @@ final class LiveTranscriber {
         self.request = request
         lock.unlock()
         taskStarted = Date()
-        let base = finished
+        lastResultAt = Date()
+        taskBase = finished
         taskHeard = ""
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
@@ -106,8 +110,17 @@ final class LiveTranscriber {
                 guard let self, self.currentRequest === request || !self.running else { return }
                 if let result {
                     let heard = result.bestTranscription.formattedString
-                    if !heard.isEmpty { self.taskHeard = heard }
-                    self.text = Self.join(base, self.taskHeard)
+                    let gap = Date().timeIntervalSince(self.lastResultAt)
+                    self.lastResultAt = Date()
+                    if !heard.isEmpty {
+                        // iOS 18부터 잠깐 쉬었다 말하면 앞 글을 빼고 새 말만 보낸다.
+                        // 새 글이 앞 글과 이어지지 않으면 앞 글을 굳혀 두고 뒤에 붙인다 (2026-11-15 실기기: "방금 말하는것만 남아").
+                        if SpeechText.isRestart(previous: self.taskHeard, new: heard, gap: gap) {
+                            self.taskBase = Self.join(self.taskBase, self.taskHeard)
+                        }
+                        self.taskHeard = heard
+                    }
+                    self.text = Self.join(self.taskBase, self.taskHeard)
                     self.onText?(self.text)
                 }
                 guard result?.isFinal == true || error != nil else { return }
@@ -146,5 +159,25 @@ final class LiveTranscriber {
             let text = result?.bestTranscription.formattedString ?? ""
             DispatchQueue.main.async { done(text) }
         }
+    }
+}
+
+/// 음성 인식 글을 견주는 도구 (노트 마이크 `Dictation`, 음성 메모 `LiveTranscriber` 함께 씀).
+enum SpeechText {
+    /// 글자와 숫자만 남긴다. 쉼표·띄어쓰기가 고쳐져도 같은 말인지 견주려고.
+    static func letters(_ text: String) -> [Character] {
+        Array(text.filter { $0.isLetter || $0.isNumber })
+    }
+
+    /// 새로 온 글이 앞 글을 고쳐 쓴 것(이어짐)이 아니라, 쉼 뒤에 새로 시작한 글인지.
+    /// - 말하는 동안의 고쳐 쓰기는 0.1~0.3초 간격으로 오고 앞부분이 거의 같다.
+    /// - 쉼 뒤 새 글은 0.8초 넘게 지나서 오고 앞부분이 다르다.
+    /// 헷갈리면 "새로 시작"으로 본다 — 같은 말이 두 번 나올 수는 있어도 앞 글을 지우지는 않게.
+    static func isRestart(previous: String, new: String, gap: TimeInterval) -> Bool {
+        let a = letters(previous), b = letters(new)
+        guard !a.isEmpty, !b.isEmpty, gap >= 0.8 else { return false }
+        var common = 0
+        while common < a.count, common < b.count, a[common] == b[common] { common += 1 }
+        return Double(common) < Double(min(a.count, b.count)) * 0.6
     }
 }

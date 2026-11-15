@@ -25,6 +25,8 @@ final class Dictation: ObservableObject {
     /// 지금 인식 작업에서 말하는 중인(아직 구간이 닫히지 않은) 글
     private var pendingPartial = ""
     private var taskStarted = Date()
+    /// 마지막으로 인식 결과가 온 때. 쉼 뒤 새로 시작한 글인지 가리려고 (2026-11-15).
+    private var lastResultAt = Date()
     private var quickFailures = 0
     /// 소리 스레드와 화면 스레드가 함께 `request`를 쓴다.
     private let lock = NSLock()
@@ -143,15 +145,28 @@ final class Dictation: ObservableObject {
         self.request = request
         lock.unlock()
         taskStarted = Date()
+        lastResultAt = Date()
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self, self.isListening, self.currentRequest === request else { return }
                 if let result {
                     var text = result.bestTranscription.formattedString
                     let ended = result.speechRecognitionMetadata != nil || result.isFinal
+                    let gap = Date().timeIntervalSince(self.lastResultAt)
+                    self.lastResultAt = Date()
                     // 끝날 때 빈 글이 오면(화면이 꺼질 때 등) 마지막에 들은 글을 쓴다.
                     if ended && text.isEmpty {
                         text = self.pendingPartial
+                    }
+                    // iOS 18부터 잠깐 쉬었다 말하면 앞 글을 빼고 새 말만 보낸다. 그대로 두면 새 글이 앞 글 자리를 덮어쓴다
+                    // (2026-11-15 실기기: "기존에 있던게 없어지고, 지금 말하는게 나와"). 앞 글을 한 구간으로 닫고 새 글은 뒤에 붙인다.
+                    if SpeechText.isRestart(previous: self.pendingPartial, new: text, gap: gap) {
+                        let closing = self.pendingPartial
+                        self.pendingPartial = ""
+                        self.lastEndedText = closing
+                        self.endedTranscript = Self.join(self.endedTranscript, closing)
+                        self.transcript = self.endedTranscript
+                        self.onText?(closing, true)
                     }
                     if !ended {
                         if !text.isEmpty { self.pendingPartial = text }

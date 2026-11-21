@@ -307,6 +307,11 @@ struct NoteEditorView: View {
             } label: {
                 Label("텍스트 내보내기", systemImage: "text.alignleft")
             }
+            Button {
+                copySummaryRequest()
+            } label: {
+                Label("AI 요약용 복사", systemImage: "doc.on.clipboard")
+            }
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button {
                     tool = .select
@@ -637,6 +642,35 @@ struct NoteEditorView: View {
             .replacingOccurrences(of: "\n", with: "\r\n")
         // PC의 메모장 등에서 한글이 깨지지 않도록 UTF-8 표식(BOM)을 붙이고 줄바꿈도 Windows 방식으로 쓴다.
         share(Data([0xEF, 0xBB, 0xBF]) + Data(text.utf8), fileExtension: "txt")
+    }
+
+    /// 노트 글 앞에 "회의록으로 정리해 줘" 부탁 글을 붙여 복사한다.
+    /// 아이폰 14 Pro Max는 애플 AI(요약)가 안 돼서, Claude·ChatGPT 앱에 붙여 넣어 정리하게 한다.
+    private func copySummaryRequest() {
+        let body = page.plainText().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else {
+            audio.errorMessage = "복사할 글자가 없습니다. 녹음을 글자로 바꾼 뒤에 해 보세요. 손으로 그린 필기와 사진은 복사되지 않습니다."
+            return
+        }
+        let title = titleText.trimmingCharacters(in: .whitespaces)
+        let request = """
+        아래는 회의(또는 녹음)를 받아 적은 글이야. 받아쓰기라 틀린 낱말이 있을 수 있으니 앞뒤 뜻으로 바로잡아 읽어 줘.
+        숫자·이름·날짜를 바로잡았으면 (원래 → 고침)으로 표시해 줘.
+        다음 차례로 한국어로 정리해 줘.
+        1. 세 줄 요약
+        2. 회의록 — 주제별로, 누가 무슨 말을 했는지 ("화자 1·2"가 있으면 그대로 써 줘)
+        3. 정해진 것
+        4. 할 일 — 누가 / 무엇을 / 언제까지 (글에 없으면 "안 나옴")
+        5. 다음에 확인할 것
+        글에 없는 내용은 지어내지 말아 줘.
+        """
+        let heading = title.isEmpty ? note.title : title
+        UIPasteboard.general.string = request + "\n\n---\n제목: " + heading + "\n\n" + body
+        // 아주 긴 회의는 요금제에 따라 한 번에 다 안 들어갈 수 있어 미리 알린다(2만 자는 대략의 기준).
+        let longNote = body.count > 20_000
+            ? "\n\n글이 깁니다. 한 번에 안 들어가면 앞 반을 먼저 붙여 넣고, 뒤 반은 '앞 글에 이어서 같은 방식으로 정리해 줘'를 먼저 적은 뒤 붙여 넣으세요."
+            : ""
+        audio.errorMessage = "복사했습니다 (\(body.count)자). Claude나 ChatGPT 앱을 열어 입력칸을 길게 누르고 '붙여넣기' 하세요. 붙여 넣을 때는 인터넷이 필요합니다." + longNote
     }
 
     private func exportPDF() {

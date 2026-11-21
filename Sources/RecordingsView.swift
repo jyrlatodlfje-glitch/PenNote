@@ -29,6 +29,17 @@ struct RecordingsView: View {
                                 Button("한국어 (빠름)") { transcribe(url, mode: .fast("ko-KR")) }
                                 Button("English (빠름)") { transcribe(url, mode: .fast("en-US")) }
                                 Button("한·영 혼합 (느림)") { transcribe(url, mode: .mixed) }
+                                Section("누가 말했는지 나누기 (회의용)") {
+                                    Button("한국어 + 화자 구분") {
+                                        transcribe(url, mode: .fast("ko-KR"), speakers: true)
+                                    }
+                                    Button("English + 화자 구분") {
+                                        transcribe(url, mode: .fast("en-US"), speakers: true)
+                                    }
+                                    Button("한·영 혼합 + 화자 구분 (느림)") {
+                                        transcribe(url, mode: .mixed, speakers: true)
+                                    }
+                                }
                             } label: {
                                 Image(systemName: "text.bubble")
                             }
@@ -52,7 +63,9 @@ struct RecordingsView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if transcriber.busy != nil {
-                    Text("\(transcriber.status) · 끝날 때까지 이 화면을 열어 두세요")
+                    Text(transcriber.continuesInBackground
+                         ? "\(transcriber.status) · 화면을 꺼도 계속됩니다 (잠금 화면에 진행 표시). 이 창은 닫지 마세요"
+                         : "\(transcriber.status) · 끝날 때까지 이 화면을 열어 두세요")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .padding(8)
@@ -89,8 +102,8 @@ struct RecordingsView: View {
         }
     }
 
-    private func transcribe(_ url: URL, mode: Transcriber.Mode) {
-        transcriber.transcribe(url, mode: mode) { text in
+    private func transcribe(_ url: URL, mode: Transcriber.Mode, speakers: Bool = false) {
+        transcriber.transcribe(url, mode: mode, speakers: speakers) { text in
             onTranscript(text)
             dismiss()
         }

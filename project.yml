@@ -2,7 +2,7 @@ name: PenNote
 options:
   bundleIdPrefix: com.jykim
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "17.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -11,6 +11,10 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit
     from: 0.9.0
+  # 회의 녹음에서 누가 말했는지 나누기(기기 안에서). iOS 17 이상이 필요해 위 최소 iOS를 17.0으로 올렸다(2026-11-21).
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: 0.17.7
 targets:
   PenNote:
     type: application
@@ -21,6 +25,8 @@ targets:
     dependencies:
       - package: WhisperKit
         product: WhisperKit
+      - package: FluidAudio
+        product: FluidAudio
     scheme: {}
     info:
       path: Config/Info.plist
@@ -30,7 +36,12 @@ targets:
         NSMicrophoneUsageDescription: 회의 내용을 노트에 녹음하기 위해 마이크를 사용합니다.
         NSCameraUsageDescription: 사진을 찍어 노트에 넣기 위해 카메라를 사용합니다.
         NSSpeechRecognitionUsageDescription: 말한 내용을 글자로 받아 적기 위해 음성 인식을 사용합니다.
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, processing]
+        # 녹음 → 글자 변환을 화면을 꺼도 이어 하기(iOS 26 BGContinuedProcessingTask, 2026-11-21).
+        # SideStore가 번들 ID 끝에 팀 번호(6JAM4983K9)를 붙여 설치하므로 두 이름을 모두 허락한다.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.jykim.pennote.transcribe.*
+          - com.jykim.pennote.6JAM4983K9.transcribe.*
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

@@ -1,5 +1,6 @@
 import AVFoundation
 import BackgroundTasks
+import CoreML
 import Speech
 import UIKit
 import WhisperKit
@@ -49,9 +50,9 @@ final class Transcriber: ObservableObject {
         }
         relaunch = launch
         let start = { launch(run) }
-        // 애플 엔진(빠름)일 때만 화면을 꺼도 이어 하게 맡긴다. Whisper(한·영 혼합)는 그래픽 칩을 써서
-        // 화면이 꺼지면 막힐 수 있어 예전처럼 화면을 켜 두고 한다.
-        if #available(iOS 26.0, *), case .fast(_) = mode, submitContinuedTask(run: run, start: start) {
+        // 두 방식 모두 화면을 꺼도 이어 하게 맡긴다. Whisper(한·영 혼합)는 그래픽 칩(GPU)을 쓰지 않게
+        // 불러 두므로(transcribeWithWhisper) 화면이 꺼져도 모델 내려받기·변환이 이어진다(2026-11-21).
+        if #available(iOS 26.0, *), submitContinuedTask(run: run, start: start) {
             return
         }
         start()
@@ -60,19 +61,31 @@ final class Transcriber: ObservableObject {
     private func startWork(_ url: URL, mode: Mode, speakers: Bool, run: UUID,
                            completion: @escaping (String) -> Void) {
         guard currentRun == run else { return }
+        // 그만둔 옛 작업이 아직 돌고 있으면(모델 준비·화자 구분은 중간에 바로 멈추지 않음) 끝날 때까지 기다린다.
+        // 같은 모델을 두 작업이 동시에 받거나 쓰면 파일이 깨지거나 앱이 멈출 수 있어서다.
+        let previous = task
         task = Task { @MainActor in
-            var succeeded = false
             // 모델을 처음 내려받는 동안처럼 진행이 한참 그대로일 때, 8초마다 1%씩 살짝 올려
-            // 아이폰이 "멈춘 작업"으로 보고 화면 꺼진 동안 끊지 않게 한다(다음 단계 몫은 넘지 않음).
+            // 아이폰이 "멈춘 작업"으로 보고 화면 꺼진 동안 끊지 않게 한다(97%까지 — 실제 진행이 오면 그 값이 앞섬).
+            // 앞 작업을 기다리는 동안에도 돌도록 기다리기 전에 만든다.
             let heartbeat = Task { @MainActor [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                while true {
+                    do { try await Task.sleep(nanoseconds: 8_000_000_000) } catch { break }
                     self?.nudgeProgress()
                 }
             }
+            defer { heartbeat.cancel() }
+            if let previous {
+                previous.cancel()
+                self.report(0.01, "앞 작업을 정리하는 중")
+                await previous.value
+            }
+            guard self.currentRun == run, !Task.isCancelled else { return }
+            var succeeded = false
             defer {
-                heartbeat.cancel()
                 if self.currentRun == run {
+                    // 다 끝난 작업은 다음 변환이 기다리지 않게 비운다.
+                    self.task = nil
                     UIApplication.shared.isIdleTimerDisabled = false
                     self.endBackgroundTask(success: succeeded)
                 }
@@ -86,9 +99,10 @@ final class Transcriber: ObservableObject {
                 if #available(iOS 26.0, *), case .fast(let language) = mode {
                     (text, pieces) = try await transcribeWithApple(url, language: language, share: writeShare)
                 } else if case .fast(let language) = mode {
-                    (text, pieces) = try await transcribeWithWhisper(url, language: String(language.prefix(2)))
+                    (text, pieces) = try await transcribeWithWhisper(url, language: String(language.prefix(2)),
+                                                                     share: writeShare)
                 } else {
-                    (text, pieces) = try await transcribeWithWhisper(url, language: "ko")
+                    (text, pieces) = try await transcribeWithWhisper(url, language: "ko", share: writeShare)
                 }
                 guard !Task.isCancelled else { return }
                 if speakers, !pieces.isEmpty {
@@ -125,8 +139,8 @@ final class Transcriber: ObservableObject {
     }
 
     func cancel() {
+        // task 는 비우지 않는다 — 다음 변환이 이 옛 작업이 끝나길 기다릴 수 있게(startWork).
         task?.cancel()
-        task = nil
         busy = nil
         // 그만두면 화면 잠금 막기를 바로 푼다(옛 작업이 뒤에서 끝날 때까지 기다리지 않음).
         currentRun = UUID()
@@ -137,6 +151,8 @@ final class Transcriber: ObservableObject {
     /// 화면 아래 글과(있으면) 잠금 화면의 진행 표시를 함께 고친다. fraction 은 0~1.
     private func report(_ fraction: Double, _ text: String) {
         status = text
+        // 값이 숫자가 아니면(NaN) 아래 Int64 바꾸기에서 앱이 꺼지므로 글만 고친다.
+        guard fraction.isFinite else { return }
         if #available(iOS 26.0, *), let bg = backgroundTask as? BGContinuedProcessingTask {
             let done = Int64((min(max(fraction, 0), 1) * 100).rounded())
             if done > bg.progress.completedUnitCount {
@@ -211,7 +227,6 @@ final class Transcriber: ObservableObject {
     private func expire(run: UUID) {
         guard currentRun == run else { return }
         task?.cancel()
-        task = nil
         // 시작하자마자(5초 안) 끊겼고 회원님이 아직 앱을 보고 있으면, 예전처럼 앞에서 다시 한다.
         if UIApplication.shared.applicationState == .active,
            Date().timeIntervalSince(backgroundStartedAt) < 5,
@@ -289,17 +304,55 @@ final class Transcriber: ObservableObject {
     }
 
     @MainActor
-    private func transcribeWithWhisper(_ url: URL, language: String) async throws -> (String, [SpokenPiece]) {
+    private func transcribeWithWhisper(_ url: URL, language: String,
+                                       share: Double) async throws -> (String, [SpokenPiece]) {
         if pipe == nil {
-            status = "인식 모델 준비 중 (최초 1회 내려받기, 몇 분 걸릴 수 있음)"
-            pipe = try await WhisperKit()
+            report(0.01, "인식 모델 준비 중 (최초 1회 내려받기, 몇 분 걸릴 수 있음 — 와이파이 권장)")
+            // 화면이 꺼진 동안 그래픽 칩(GPU)은 따로 허락이 있어야 해서 쓰지 않는다.
+            // 소리 → 숫자 바꾸기(mel)는 가벼워 CPU, 무거운 두 모델은 뉴럴 엔진.
+            let compute = ModelComputeOptions(melCompute: .cpuOnly,
+                                              audioEncoderCompute: .cpuAndNeuralEngine,
+                                              textDecoderCompute: .cpuAndNeuralEngine)
+            let made = try await WhisperKit(WhisperKitConfig(computeOptions: compute))
+            // 받는 도중 취소되면 WhisperKit이 반쯤 받은 폴더를 성공처럼 돌려준다 → 붙잡지 않는다
+            // (붙잡으면 앱을 끌 때까지 "Model file not found"만 남).
+            try Task.checkCancellation()
+            pipe = made
         }
         guard let pipe else { return ("", []) }
-        status = "변환 중 (느린 방식)"
-        var options = DecodingOptions()
-        options.language = language
-        options.detectLanguage = false
-        let results: [TranscriptionResult] = try await pipe.transcribe(audioPath: url.path, decodeOptions: options)
+        report(0.05, "변환 중 (느린 방식)")
+        var settings = DecodingOptions()
+        settings.language = language
+        settings.detectLanguage = false
+        // 아래 클로저가 바뀔 수 있는 변수(var)를 잡지 않게 고정한 사본을 쓴다.
+        let options = settings
+        let results: [TranscriptionResult]
+        // 실제 진행(약 30초 녹음마다 오름)을 2초마다 읽어 잠금 화면에 알린다. 진행이 멈춘 듯 보이면
+        // 아이폰이 화면 꺼진 작업을 먼저 끊으므로. WhisperKit이 진행 객체를 새로 바꾸므로 매번 다시 읽는다.
+        let watcher = Task { @MainActor [weak self] in
+            while true {
+                // 취소되면 바로 빠진다(한 번 더 알려 다음 단계 글을 덮지 않게).
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
+                let done = min(max(pipe.progress.fractionCompleted, 0), 1)
+                self?.report(0.05 + (share - 0.05) * done, "글자로 바꾸는 중 \(Int(done * 100))% (느린 방식)")
+            }
+        }
+        defer { watcher.cancel() }
+        do {
+            if #available(iOS 18.0, *) {
+                // 글자 고르기 계산(MLTensor)도 CPU로 — 화면이 꺼진 동안 그래픽 칩을 쓰지 않게.
+                results = try await withMLTensorComputePolicy(.cpuOnly) {
+                    try await pipe.transcribe(audioPath: url.path, decodeOptions: options)
+                }
+            } else {
+                results = try await pipe.transcribe(audioPath: url.path, decodeOptions: options)
+            }
+        } catch {
+            // 모델 파일이 빠져 실패했을 수 있으니 버리고, 다음에 다시 누르면 새로 준비(받다 만 곳부터 이어 받음).
+            // 회원님이 취소한 것이면 잘 올라간 모델이므로 그대로 둔다.
+            if !(error is CancellationError), !Task.isCancelled { self.pipe = nil }
+            throw error
+        }
         let text = results.map { $0.text }.joined(separator: " ")
         // 구간 글에 섞여 나오는 <|…|> 표시는 빼고 쓴다.
         let pieces = results.flatMap { $0.segments }.map { segment in

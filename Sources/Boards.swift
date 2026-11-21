@@ -286,14 +286,24 @@ enum BoardExport {
 
     /// 제목을 파일 이름으로 한 임시 파일을 만들어 공유 화면에 넘길 것을 돌려준다.
     static func file(_ data: Data, name: String, fileExtension: String) -> SharedItem? {
-        let safe = name
-            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
-            .joined(separator: " ")
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(safe.isEmpty ? "PenNote" : safe)
+            .appendingPathComponent(safeFileName(name))
             .appendingPathExtension(fileExtension)
         guard (try? data.write(to: url, options: .atomic)) != nil else { return nil }
         return SharedItem(item: url)
+    }
+
+    /// 파일 이름으로 쓸 수 있게 다듬는다: 못 쓰는 글자·줄바꿈을 빈칸으로, 60자까지만, 비면 "PenNote".
+    /// 제목(첫 줄)이 길면 이름 한도(255바이트, 한글 약 85자)를 넘어 내보내기가 실패하던 것(2026-11-21).
+    static func safeFileName(_ name: String) -> String {
+        let cleaned = name
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|").union(.newlines))
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        let short = String(cleaned.prefix(60)).trimmingCharacters(in: .whitespaces)
+        // 맨 앞 점은 숨은 파일이 되므로 뺀다.
+        let visible = String(short.drop(while: { $0 == "." })).trimmingCharacters(in: .whitespaces)
+        return visible.isEmpty ? "PenNote" : visible
     }
 
     /// PC의 메모장에서 한글이 깨지지 않도록 UTF-8 표식(BOM)을 붙이고 줄바꿈도 Windows 방식으로 쓴다.

@@ -54,9 +54,30 @@ final class InkRecognizer: ObservableObject {
             self?.prepare()
         })
         observers.append(center.addObserver(forName: .mlkitModelDownloadDidFail, object: nil, queue: .main) { [weak self] _ in
-            self?.downloadFailed = true
-            self?.refreshState()
+            guard let self else { return }
+            self.downloadFailed = true
+            self.refreshState()
+            // 실패하면 그대로 두지 않고 20초 뒤 다시 받는다(3번까지). 전에는 노트를 닫았다 열어야 했음(2026-11-21).
+            guard self.autoRetries < 3 else { return }
+            self.autoRetries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                self?.retryDownload()
+            }
         })
+        // 앱으로 돌아올 때(와이파이를 켜고 돌아오는 등)도 실패한 모델이 있으면 다시 받는다.
+        observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.downloadFailed else { return }
+            self.autoRetries = 0
+            self.retryDownload()
+        })
+        prepare()
+    }
+
+    private var autoRetries = 0
+
+    /// 받지 못한 모델을 다시 받는다.
+    private func retryDownload() {
+        downloadFailed = false
         prepare()
     }
 
@@ -169,7 +190,7 @@ final class InkRecognizer: ObservableObject {
         if ready {
             state = .ready
         } else if downloadFailed {
-            state = .failed("인식 모델을 내려받지 못했습니다. 인터넷 연결을 확인하세요.")
+            state = .failed("인식 모델을 내려받지 못했습니다. 인터넷에 연결되면 저절로 다시 받습니다.")
         } else {
             state = .downloading
         }

@@ -129,6 +129,14 @@ final class LiveTranscriber {
                 self.quickFailures = Date().timeIntervalSince(self.taskStarted) < 1 ? self.quickFailures + 1 : 0
                 if self.quickFailures < 3 {
                     self.beginTask()
+                } else {
+                    // 연달아 실패해도(전화 직후 등) 그만두지 않고 2초 쉬었다 다시 듣는다 — 노트 마이크(Dictation)와 같게.
+                    // 전에는 여기서 멈춰 남은 녹음 내내 글이 안 나왔다(2026-11-21 검토).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                        guard let self, self.running, self.currentRequest === request else { return }
+                        self.quickFailures = 0
+                        self.beginTask()
+                    }
                 }
             }
         }

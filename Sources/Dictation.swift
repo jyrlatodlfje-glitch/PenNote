@@ -31,8 +31,14 @@ final class Dictation: ObservableObject {
     /// 소리 스레드와 화면 스레드가 함께 `request`를 쓴다.
     private let lock = NSLock()
     private var observer: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
 
     init() {
+        // 에어팟을 끼거나 빼면 iOS가 소리 엔진을 멈추고 이 알림을 보낸다. 새 마이크로 다시 건다(2026-11-21).
+        routeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                                               object: engine, queue: .main) { [weak self] _ in
+            self?.restartAfterRouteChange()
+        }
         // 전화가 오면 마이크가 멈춘다. 전화가 끝나면 다시 듣는다.
         observer = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification,
                                                           object: nil, queue: .main) { [weak self] notification in
@@ -46,6 +52,37 @@ final class Dictation: ObservableObject {
 
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+    }
+
+    /// 마이크가 바뀐 뒤 새 형식으로 소리 받기를 다시 걸고 엔진을 켠다.
+    /// 소리 파일은 처음 형식으로 열려 있어 형식이 달라지면 더 쓰지 않는다(받아 적기는 이어짐).
+    private func restartAfterRouteChange() {
+        guard isListening else { return }
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        // 아직 새 마이크가 준비되지 않았으면(0Hz) 다음 알림을 기다린다 — 걸면 앱이 꺼짐.
+        guard (try? VoiceMemoSaver.checkMicrophone(format)) != nil else { return }
+        // 바뀐 직후엔 출력 형식이 실제 마이크 형식과 아직 다를 수 있다 — 다르면 걸 때 앱이 꺼지므로 다음 알림을 기다린다.
+        let hardware = input.inputFormat(forBus: 0)
+        guard hardware.sampleRate == format.sampleRate, hardware.channelCount == format.channelCount else { return }
+        // 소리 받기를 먼저 떼어 소리 스레드가 파일에 쓰는 중에 파일을 놓지 않게 한다.
+        input.removeTap(onBus: 0)
+        if let file, file.processingFormat.sampleRate != format.sampleRate
+            || file.processingFormat.channelCount != format.channelCount {
+            self.file = nil
+        }
+        installTap(on: input, format: format)
+        engine.prepare()
+        try? engine.start()
+    }
+
+    private func installTap(on input: AVAudioInputNode, format: AVAudioFormat) {
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
+            try? self.file?.write(from: buffer)
+            self.currentRequest?.append(buffer)
+        }
     }
 
     /// `onText(글, 구간종료)`: 같은 구간의 글은 말하는 동안 계속 고쳐져서 다시 온다.
@@ -100,6 +137,7 @@ final class Dictation: ObservableObject {
 
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
+            try VoiceMemoSaver.checkMicrophone(format)
             file = nil
             recordingURL = nil
             if let noteID {
@@ -109,15 +147,14 @@ final class Dictation: ObservableObject {
                 recordingURL = file?.url
             }
             input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-                guard let self else { return }
-                try? self.file?.write(from: buffer)
-                self.currentRequest?.append(buffer)
-            }
+            installTap(on: input, format: format)
             engine.prepare()
             try engine.start()
         } catch {
             file = nil
+            // 켜 둔 녹음 세션을 끄지 않으면 음악 같은 다른 앱 소리가 멈춘 채 남는다.
+            engine.inputNode.removeTap(onBus: 0)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             errorMessage = "음성 입력을 시작하지 못했습니다: \(error.localizedDescription)"
             return
         }

@@ -7,6 +7,7 @@ struct RecordingsView: View {
 
     @ObservedObject private var transcriber = Transcriber.shared
     @State private var showImporter = false
+    @State private var recordingsToDelete: [URL] = []
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -52,8 +53,22 @@ struct RecordingsView: View {
                     .buttonStyle(.borderless)
                 }
                 .onDelete { offsets in
-                    offsets.map { audio.recordings[$0] }.forEach(audio.delete)
+                    // 바로 지우지 않고 묻는다 — 1시간 회의 녹음도 되살릴 수 없게 지워지므로(2026-11-21).
+                    recordingsToDelete = offsets.map { audio.recordings[$0] }
                 }
+            }
+            .confirmationDialog("녹음을 지울까요?",
+                                isPresented: Binding(get: { !recordingsToDelete.isEmpty },
+                                                     set: { if !$0 { recordingsToDelete = [] } }),
+                                titleVisibility: .visible) {
+                Button("삭제", role: .destructive) {
+                    let urls = recordingsToDelete
+                    recordingsToDelete = []
+                    urls.forEach(audio.delete)
+                }
+                Button("취소", role: .cancel) { recordingsToDelete = [] }
+            } message: {
+                Text("녹음 파일이 지워지고 되살릴 수 없습니다.")
             }
             .overlay {
                 if audio.recordings.isEmpty {

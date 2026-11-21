@@ -281,9 +281,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         var pages: [CGRect] = []
         var top: CGFloat = 0
         if isBoard {
-            // 화이트보드는 내용이 있는 부분만 한 장으로 내보낸다.
-            let content = contentBounds() ?? CGRect(x: 0, y: 0, width: width, height: pageHeight)
-            pages.append(content.insetBy(dx: -24, dy: -24))
+            // 화이트보드는 내용이 있는 부분만 내보낸다. 넓게 흩어 썼으면 2,000pt 칸으로 나눠 여러 쪽으로 —
+            // 한 장이면 PDF 쪽 한도(14,400pt)를 넘고 필기 그림이 수백 MB가 되어 앱이 꺼질 수 있음(2026-11-21).
+            let content = (contentBounds() ?? CGRect(x: 0, y: 0, width: width, height: pageHeight))
+                .insetBy(dx: -24, dy: -24)
+            let tile: CGFloat = 2000
+            var y = content.minY
+            while y < content.maxY {
+                var x = content.minX
+                while x < content.maxX {
+                    pages.append(CGRect(x: x, y: y, width: min(tile, content.maxX - x),
+                                        height: min(tile, content.maxY - y)))
+                    x += tile
+                }
+                y += tile
+            }
         }
         for pageEnd in note.pageBreaks ?? [] where pageEnd > top {
             pages.append(CGRect(x: 0, y: top, width: width, height: pageEnd - top))
@@ -295,7 +307,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
 
         return UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: pages[0].size)).pdfData { context in
-            for visible in pages {
+            let inkBounds = drawing.bounds
+            for visible in pages { autoreleasepool {
+                // 쪽마다 사진·필기 그림 메모리를 바로 비운다(쪽 많은 노트에서 메모리가 쌓이지 않게).
                 context.beginPage(withBounds: CGRect(origin: .zero, size: visible.size), pageInfo: [:])
                 context.cgContext.saveGState()
                 context.cgContext.translateBy(x: -visible.minX, y: -visible.minY)
@@ -326,14 +340,18 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                         view.attributedText.draw(in: view.frame)
                     }
                 }
-                var ink: UIImage?
-                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                    ink = drawing.image(from: visible, scale: 2)
+                // 필기가 이 쪽에 걸칠 때만 그림을 뜬다. 큰 쪽은 배율을 낮춰 그림 한 장이 4,096px를 넘지 않게.
+                if !inkBounds.isNull, !inkBounds.isEmpty, inkBounds.intersects(visible) {
+                    let scale = min(2, 4096 / max(visible.width, visible.height, 1))
+                    var ink: UIImage?
+                    UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                        ink = drawing.image(from: visible, scale: scale)
+                    }
+                    ink?.draw(in: visible)
                 }
-                ink?.draw(in: visible)
 
                 context.cgContext.restoreGState()
-            }
+            } }
         }
     }
 
@@ -346,8 +364,24 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             .joined(separator: "\n")
     }
 
-    func undo() { canvas.undoManager?.undo() }
-    func redo() { canvas.undoManager?.redo() }
+    // 올가미로 고른 채 되돌리면 고른 획 번호가 밀려 다음에 다른 획이 움직이거나 지워지므로, 먼저 고르기를 푼다(2026-11-21).
+    func undo() {
+        clearLasso()
+        canvas.undoManager?.undo()
+    }
+    func redo() {
+        clearLasso()
+        canvas.undoManager?.redo()
+    }
+
+    /// 앱이 글·필기를 직접 바꾼 뒤(올가미 옮기기, 녹음 글 바꿔 넣기) 부른다. 시스템 되돌리기 기록은
+    /// 그 바뀐 내용을 모르므로, 남겨 두면 ↶가 엉뚱한 범위에 적용돼 앱이 꺼질 수 있다 → 기록을 비운다.
+    private func resetUndoHistory() {
+        canvas.undoManager?.removeAllActions()
+        for textView in textViews.values {
+            textView.undoManager?.removeAllActions()
+        }
+    }
 
     // MARK: - 글자 입력
 
@@ -357,8 +391,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
         guard let textView = selectedTextView else { return }
         textView.typingAttributes = Self.textAttributes
+        programmaticEdit = true
         textView.insertText(string)
+        programmaticEdit = false
         textViewDidChange(textView)
+    }
+
+    /// 앱이 넣는 글(받아쓰기·글씨 칸)인지. 이때는 보던 자리를 지키는 규칙(keepPosition)을 건드리지 않는다.
+    private var programmaticEdit = false
+
+    /// 아이폰 키보드로 직접 칠 때: 다시 커서를 따라간다(스크롤해 둔 뒤 치면 커서가 키보드 밑에 숨던 것, 2026-11-21).
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        if !programmaticEdit {
+            keepPosition = false
+        }
+        return true
     }
 
     /// 키보드로 쓰기 시작: 고른 글상자가 없으면 지금 보이는 곳에 만들고, 아이폰 키보드를 띄운다.
@@ -381,16 +428,20 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     /// 기존 내용과 겹치지 않게 페이지 맨 아래에 새 글상자로 넣는다.
     /// `follow`가 false면(녹음을 다시 받아 적은 글처럼 저절로 들어오는 글) 보던 자리를 지킨다.
     func appendBlock(_ string: String, follow: Bool = true) {
-        if follow {
-            keepPosition = false
+        // 화이트보드에는 '맨 아래'가 없으므로 지금 보고 있는 곳에 넣는다.
+        let point = isBoard
+            ? CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight * 2)
+            : CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5)
+        guard follow else {
+            // 저절로 들어오는 글: 고르지 않고 놓기만 한다. 회원님이 쓰던 글상자의 커서·키보드·
+            // 음성 입력 이어 쓰기와 보던 자리를 빼앗지 않게(2026-11-21 검토 지적).
+            placeText(at: point, text: string)
+            commit()
+            return
         }
+        keepPosition = false
         deselect()
-        if isBoard {
-            // 화이트보드에는 '맨 아래'가 없으므로 지금 보고 있는 곳에 넣는다.
-            createText(at: CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight * 2))
-        } else {
-            createText(at: CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5))
-        }
+        createText(at: point)
         insertText(string)
     }
 
@@ -401,8 +452,23 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     func backspace() {
         guard let textView = selectedTextView else { return }
+        programmaticEdit = true
         textView.deleteBackward()
+        programmaticEdit = false
         textViewDidChange(textView)
+    }
+
+    /// 글이 `old` 와 꼭 같은 글상자를 `new` 로 바꾼다(음성 메모 안내문 → 녹음으로 다시 받아 적은 글).
+    /// 보던 자리와 커서는 그대로 둔다. 그런 글상자가 없으면 false.
+    func replaceTextItem(_ old: String, with new: String) -> Bool {
+        guard let index = note.texts.firstIndex(where: { $0.text == old }) else { return false }
+        let id = note.texts[index].id
+        note.texts[index].text = new
+        textViews[id]?.attributedText = NSAttributedString(string: new, attributes: Self.textAttributes)
+        layoutText(id)
+        resetUndoHistory()
+        commit()
+        return true
     }
 
     /// 커서 바로 앞이 `old`일 때만 `new`로 바꾼다.
@@ -412,7 +478,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
               let start = textView.position(from: selection.start, offset: -(old as NSString).length),
               let range = textView.textRange(from: start, to: selection.start),
               textView.text(in: range) == old else { return false }
+        programmaticEdit = true
         textView.replace(range, withText: new)
+        programmaticEdit = false
         textViewDidChange(textView)
         return true
     }
@@ -490,6 +558,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                 canvas.drawing = PKDrawing(strokes: strokes)
                 note.drawing = canvas.drawing.dataRepresentation()
             }
+            // 앱이 글·필기를 직접 바꿨으므로 옛 되돌리기 기록을 버린다(↶로 앱이 꺼지지 않게, 2026-11-21).
+            resetUndoHistory()
             clearLasso()
             commit()
             return
@@ -795,6 +865,16 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             let snapped = (lassoMoved.y / line).rounded() * line
             translateLasso(by: CGPoint(x: 0, y: snapped - lassoMoved.y))
         }
+        // 종이 왼쪽·위 밖으로 끌어내면 화면이 거기까지 가지 않아 다시 잡을 수 없으므로, 묶음 전체를 안으로 되돌린다(2026-11-21).
+        // 줄 맞추기 뒤에 하고, 줄노트면 줄 간격 단위로 올려 글과 필기가 어긋나지 않게 한다.
+        // 필기 미리보기 그림은 획보다 사방 4pt 넓게 떴으므로 그만큼 빼고 잰다.
+        let frames = lassoItems.compactMap { itemView($0)?.frame }
+            + (lassoGhost.map { [$0.frame.insetBy(dx: 4, dy: 4)] } ?? [])
+        if let minX = frames.map({ $0.minX }).min(), let minY = frames.map({ $0.minY }).min(), minX < 0 || minY < 0 {
+            let line = Self.lineHeight
+            let up = minY < 0 ? (note.template != .blank ? (-minY / line).rounded(.up) * line : -minY) : 0
+            translateLasso(by: CGPoint(x: max(0, -minX), y: up))
+        }
         if let ghost = lassoGhost {
             let move = CGAffineTransform(translationX: lassoMoved.x, y: lassoMoved.y)
             let moved = lassoPicked.map { stroke -> PKStroke in
@@ -822,10 +902,27 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
         lassoMoving = false
         note.drawing = canvas.drawing.dataRepresentation()
+        // 앱이 필기·글을 직접 바꿨으므로 옛 되돌리기 기록은 버린다(↶로 앱이 꺼지거나 엉뚱한 획이 움직이지 않게).
+        resetUndoHistory()
         commit()
     }
 
     private func clearLasso() {
+        // 끄는 도중(고른 획을 잠시 빼 둔 상태)에 불리면 빼 둔 획을 되돌려 놓는다 — 안 그러면 그 필기가 사라진다(2026-11-21).
+        if lassoMoving, lassoGhost != nil {
+            canvas.drawing = PKDrawing(strokes: lassoRest + lassoPicked)
+            note.drawing = canvas.drawing.dataRepresentation()
+            lassoPicked = []
+            lassoRest = []
+            // 끌던 글상자·사진도 저장된 제자리로 되돌린다(화면과 저장 내용이 어긋나지 않게).
+            for id in lassoItems {
+                if note.texts.contains(where: { $0.id == id }) {
+                    layoutText(id)
+                } else if let item = note.images.first(where: { $0.id == id }) {
+                    imageViews[id]?.frame = CGRect(x: item.x, y: item.y, width: item.width, height: item.height)
+                }
+            }
+        }
         let hadSelection = hasLassoSelection
         lassoPath = nil
         lassoLayer.path = nil
@@ -872,7 +969,9 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         case .changed:
             let move = gesture.translation(in: underlay)
             if isResizing {
-                let width = min(max(60, dragStart.width + move.x), bounds.width - dragStart.minX)
+                // 화이트보드는 화면 폭이 아니라 판 폭이 한계다(전엔 화면 폭으로 재어 −4,000 pt처럼 튐, 2026-11-21).
+                let limit = max(60, layoutWidth - dragStart.minX)
+                let width = min(max(60, dragStart.width + move.x), limit)
                 view.frame = CGRect(x: dragStart.minX, y: dragStart.minY,
                                     width: width, height: width * dragStart.height / dragStart.width)
             } else {
@@ -916,7 +1015,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         case .began:
             dragStart = view.frame
         case .changed:
-            let width = min(max(60, dragStart.width * gesture.scale), bounds.width)
+            // 화이트보드는 판 폭까지 키울 수 있다(전엔 화면 폭에서 멈춤, 2026-11-21).
+            let width = min(max(60, dragStart.width * gesture.scale), isBoard ? layoutWidth : bounds.width)
             let height = width * dragStart.height / dragStart.width
             view.frame = CGRect(x: dragStart.midX - width / 2, y: max(0, dragStart.midY - height / 2),
                                 width: width, height: height)
@@ -981,14 +1081,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     }
 
     private func createText(at point: CGPoint) {
+        let id = placeText(at: point, text: "")
+        select(id)
+    }
+
+    /// 글상자를 만들어 종이에 놓기만 한다(고르지 않음 — 쓰던 커서·키보드·보던 자리를 그대로 둔다).
+    @discardableResult
+    private func placeText(at point: CGPoint, text: String) -> UUID {
         let line = Self.lineHeight
         let x = min(max(12, point.x), max(12, layoutWidth - 80))
         let y = note.template == .blank ? max(0, point.y - line / 2) : max(0, (point.y / line).rounded(.down) * line)
-        let item = TextItem(x: x, y: y)
+        let item = TextItem(x: x, y: y, text: text)
         note.texts.append(item)
         addTextView(for: item)
         layoutText(item.id)
-        select(item.id)
+        return item.id
     }
 
     private func storeFrame(_ id: UUID, _ frame: CGRect) {
@@ -1018,6 +1125,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         textView.attributedText = NSAttributedString(string: item.text, attributes: Self.textAttributes)
         textView.typingAttributes = Self.textAttributes
         textView.delegate = self
+        // 화면 맨 위(시계) 누르기는 종이만 받게 한다 — 글상자들도 받으면 iOS가 아무 곳에도 보내지 않는다.
+        textView.scrollsToTop = false
         underlay.addSubview(textView)
         textViews[item.id] = textView
     }
@@ -1055,17 +1164,21 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
     }
 
+    // 글상자(UITextView)도 이 화면을 delegate로 두므로 같은 알림이 온다. 종이(canvas)의 것만 본다(2026-11-21).
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard scrollView === canvas else { return }
         keepPosition = true
     }
 
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+        guard scrollView === canvas else { return false }
         // 화면 맨 위(시계)를 눌러 맨 위로 가는 것은 회원님이 하신 것이므로 막지 않는다.
         keepPosition = false
         return true
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === canvas else { return }
         if scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
             || scrollView.isZooming || scrollView.isZoomBouncing {
             userOffset = scrollView.contentOffset

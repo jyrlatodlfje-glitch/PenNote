@@ -160,7 +160,14 @@ final class NoteStore: ObservableObject {
     }
 
     func notes(in folderID: UUID?) -> [Note] {
-        notes.filter { $0.folderID == folderID }
+        guard folderID == nil else { return notes.filter { $0.folderID == folderID } }
+        // 맨 위 목록: 폴더 밖 노트 + 있던 폴더가 없어진 노트(folders.json이 깨졌거나, 불러오는 사이 폴더를 지운 경우).
+        // 전엔 어느 목록에도 안 보이고 검색으로만 찾을 수 있었다(2026-11-21).
+        let known = Set(folders.map { $0.id })
+        return notes.filter { note in
+            guard let id = note.folderID else { return true }
+            return !known.contains(id)
+        }
     }
 
     func addNote(in folderID: UUID? = nil, whiteboard: Bool = false) -> Note {
@@ -232,7 +239,13 @@ final class NoteStore: ObservableObject {
 
     func update(_ note: Note) {
         guard let index = notes.firstIndex(where: { $0.id == note.id }), notes[index] != note else { return }
-        notes[index] = note
+        if note.modified > notes[index].modified, index != 0 {
+            // 고친 노트는 목록 맨 위로(앱을 다시 켤 때의 순서와 같게, 2026-11-21).
+            notes.remove(at: index)
+            notes.insert(note, at: 0)
+        } else {
+            notes[index] = note
+        }
         write(note)
     }
 
@@ -243,9 +256,104 @@ final class NoteStore: ObservableObject {
         update(note)
     }
 
-    /// 열려 있지 않은 노트의 맨 아래에 글상자를 하나 덧붙인다 (음성 입력을 녹음으로 다시 받아 적은 글).
-    func appendText(_ text: String, to id: UUID) {
+    // MARK: 열린 노트 화면 (2026-11-21)
+    // 노트 화면은 열 때 받은 노트 사본을 들고 있다가, 무엇이든 고치면 그 사본을 통째로 저장한다.
+    // 그래서 열려 있는 노트에 밖에서(녹음을 다시 받아 적은 글 등) 저장소에만 글을 넣으면,
+    // 다음 손질 때 옛 사본이 덮어써 그 글이 사라진다. 열려 있으면 그 화면의 종이에 넣는다.
+
+    private struct OpenPage {
+        weak var page: PageController?
+    }
+    private var openPages: [UUID: OpenPage] = [:]
+
+    /// 열린 화면이 없어 저장소에만 넣은 글. 노트 화면이 막 만들어지는 틈(사본은 옛것인데 아직
+    /// 등록 전)에 들어왔을 수 있으므로, 화면이 붙으면 그 종이에도 한 번 더 넣는다(이미 있으면 건너뜀).
+    private enum PendingEdit {
+        case replace(old: String, new: String, header: String)
+        case append(String)
+    }
+    private var pendingEdits: [UUID: [PendingEdit]] = [:]
+
+    /// 노트 화면이 열릴 때 부른다.
+    func attach(_ page: PageController, to id: UUID) {
+        openPages[id] = OpenPage(page: page)
+        page.onViewReady = { [weak self, weak page] in
+            guard let self, let page else { return }
+            self.replayPending(id, on: page)
+        }
+        if page.isAttached {
+            replayPending(id, on: page)
+        }
+    }
+
+    private func replayPending(_ id: UUID, on page: PageController, tries: Int = 0) {
+        guard page.isAttached, pendingEdits[id] != nil else { return }
+        // 종이가 아직 자리를 잡기 전(폭 0)이면 맨 아래를 잘못 재어 글이 맨 위에 겹치므로 잠깐 뒤 다시(최대 약 2초).
+        if !page.isLaidOut, tries < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak page] in
+                guard let self, let page else { return }
+                self.replayPending(id, on: page, tries: tries + 1)
+            }
+            return
+        }
+        guard let edits = pendingEdits.removeValue(forKey: id) else { return }
+        for edit in edits {
+            switch edit {
+            case let .replace(old, new, header):
+                if page.containsText(new) || page.containsText(header + new) { continue }
+                if !page.replaceText(old, with: new) {
+                    page.appendBlock(header + new, follow: false)
+                }
+            case let .append(text):
+                if !page.containsText(text) {
+                    page.appendBlock(text, follow: false)
+                }
+            }
+        }
+    }
+
+    /// 노트 화면이 닫힐 때 부른다. 그사이 같은 노트를 다시 연 화면이 있으면 그것은 그대로 둔다.
+    func detach(_ page: PageController, from id: UUID) {
+        if openPages[id]?.page === page {
+            openPages[id] = nil
+        }
+    }
+
+    /// 지금 이 노트를 보여 주는 종이(없으면 nil).
+    func openPage(for id: UUID) -> PageController? {
+        guard let page = openPages[id]?.page, page.isAttached else { return nil }
+        return page
+    }
+
+    /// 노트 안에서 글 `old` 와 꼭 같은 글상자를 `new` 로 바꾼다. 그런 글상자가 없으면
+    /// (회원님이 그새 고쳤으면) 지우지 않고 `header` + `new` 를 맨 아래에 덧붙인다.
+    func replaceText(_ old: String, with new: String, orAppendWith header: String, in id: UUID) {
+        if let page = openPage(for: id) {
+            if !page.replaceText(old, with: new) {
+                page.appendBlock(header + new, follow: false)
+            }
+            return
+        }
         guard var note = notes.first(where: { $0.id == id }) else { return }
+        guard let index = note.texts.firstIndex(where: { $0.text == old }) else {
+            appendText(header + new, to: id)
+            return
+        }
+        pendingEdits[id, default: []].append(.replace(old: old, new: new, header: header))
+        note.texts[index].text = new
+        note.modified = Date()
+        update(note)
+    }
+
+    /// 노트의 맨 아래에 글상자를 하나 덧붙인다 (음성 입력을 녹음으로 다시 받아 적은 글).
+    /// 그 노트가 화면에 열려 있으면 그 종이에 넣는다(보던 자리는 지킴).
+    func appendText(_ text: String, to id: UUID) {
+        if let page = openPage(for: id) {
+            page.appendBlock(text, follow: false)
+            return
+        }
+        guard var note = notes.first(where: { $0.id == id }) else { return }
+        pendingEdits[id, default: []].append(.append(text))
         let line = PageCanvasView.lineHeight
         let textBottom = note.texts.map { $0.y + CGFloat($0.text.components(separatedBy: "\n").count + 2) * line }.max() ?? 0
         let imageBottom = note.images.map { $0.y + $0.height }.max() ?? 0
@@ -263,6 +371,8 @@ final class NoteStore: ObservableObject {
     func delete(at offsets: IndexSet) {
         for index in offsets {
             let id = notes[index].id
+            pendingEdits[id] = nil
+            openPages[id] = nil
             try? FileManager.default.removeItem(at: fileURL(id))
             try? FileManager.default.removeItem(at: Self.imageFolder(for: id))
             try? FileManager.default.removeItem(at: AudioRecorder.folder(for: id))

@@ -74,6 +74,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func togglePlayback(_ url: URL) {
         if playing == url {
             stopPlayback()
+            releaseSessionIfIdle()
             return
         }
         stopPlayback()
@@ -117,6 +118,14 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         playing = nil
+        self.player = nil
+        releaseSessionIfIdle()
+    }
+
+    /// 재생·녹음을 다 끝냈으면 소리 세션을 놓아, 멈췄던 음악 앱이 다시 이어지게 한다(2026-11-21).
+    private func releaseSessionIfIdle() {
+        guard !isRecording, player == nil else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func start() {
@@ -183,7 +192,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func reload() {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         recordings = files
-            .filter { ["m4a", "mp3", "wav", "aac", "caf", "mp4"].contains($0.pathExtension.lowercased()) }
+            // 파일 앱에서 불러온 aiff·flac·m4b도 목록에 보이게(전엔 복사만 되고 안 보였음, 2026-11-21).
+            .filter { ["m4a", "mp3", "wav", "aac", "caf", "mp4", "aif", "aiff", "flac", "m4b"]
+                .contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 }

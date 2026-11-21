@@ -8,7 +8,16 @@ enum VoiceMemoSaver {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return folder.appendingPathComponent(formatter.string(from: date) + ".m4a")
+        let base = formatter.string(from: date)
+        // 같은 초에 파일을 또 열면(이어폰을 바로 바꾼 경우 등) 앞 파일을 덮어쓰지 않게 "-2"를 붙인다(2026-11-21).
+        var url = folder.appendingPathComponent(base + ".m4a")
+        var number = 2
+        while FileManager.default.fileExists(atPath: url.path)
+                || FileManager.default.fileExists(atPath: url.deletingPathExtension().appendingPathExtension("caf").path) {
+            url = folder.appendingPathComponent("\(base)-\(number).m4a")
+            number += 1
+        }
+        return url
     }
 
     /// m4a(AAC)로 쓸 파일을 연다. 안 되면 caf(압축 없음)로 연다.
@@ -39,16 +48,35 @@ enum VoiceMemoSaver {
     }
 
     /// 녹음 파일을 다시 글자로 바꿔, 실시간으로 받은 글보다 길면 바꿔 넣는다.
+    /// 저장하자마자 노트가 열리므로, 열린 화면에도 넣어야 옛 사본이 덮어쓰지 않는다(NoteStore.replaceText).
+    /// 회원님이 그새 그 글을 고쳤으면 지우지 않고 맨 아래에 덧붙인다.
     static func refine(noteID: UUID, liveText: String, locale: String, store: NoteStore) {
         let folder = AudioRecorder.folder(for: noteID)
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-        guard let audio = files.first(where: { ["m4a", "caf"].contains($0.pathExtension) }) else { return }
+        // 소리 파일 가운데 가장 큰 것(빈 파일·이어폰을 바꿔 새로 연 짧은 파일은 피함).
+        let sizes = files.filter { ["m4a", "caf"].contains($0.pathExtension) }.map { url in
+            (url, (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        guard let audio = sizes.filter({ $0.1 > 0 }).max(by: { $0.1 < $1.1 })?.0 else { return }
+        // 저장할 때 넣은 글(실시간 글, 비었으면 안내문) — 이 글상자를 찾아 바꾼다.
+        let saved = textItem(liveText).text
+        let live = liveText.trimmingCharacters(in: .whitespacesAndNewlines).count
         LiveTranscriber.transcribeFile(audio, locale: locale) { result in
             let result = result.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard result.count > liveText.trimmingCharacters(in: .whitespacesAndNewlines).count,
-                  var note = store.notes.first(where: { $0.id == noteID }) else { return }
-            note.texts = [textItem(result)]
-            store.update(note)
+            // 실시간 글이 있었으면 녹음 쪽이 눈에 띄게 길 때만(빠진 말이 있을 때만) 바꾼다 — 노트 마이크와 같은 기준.
+            let enough = live == 0 ? !result.isEmpty : Double(result.count) > Double(live) * 1.2 + 20
+            guard enough else { return }
+            store.replaceText(saved, with: result, orAppendWith: "[녹음으로 다시 받아 적은 글]\n", in: noteID)
+        }
+    }
+
+    /// 통화 중이거나 다른 앱이 마이크를 쥐고 있으면 마이크 형식이 0Hz·0채널로 온다.
+    /// 그 형식으로 소리 받기(installTap)를 걸면 앱이 꺼지므로, 걸기 전에 막고 알린다(2026-11-21).
+    static func checkMicrophone(_ format: AVAudioFormat) throws {
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "PenNote", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "지금은 마이크를 쓸 수 없습니다(통화 중이거나 다른 앱이 마이크를 쓰는 중). 잠시 뒤 다시 눌러 주세요.",
+            ])
         }
     }
 
@@ -73,8 +101,14 @@ final class PhoneVoiceMemo: ObservableObject {
     private let transcriber = LiveTranscriber()
     private var file: AVAudioFile?
     private var observer: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
 
     init() {
+        // 에어팟을 끼거나 빼면 iOS가 소리 엔진을 멈춘다. 새 마이크로 다시 건다(2026-11-21).
+        routeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                                               object: engine, queue: .main) { [weak self] _ in
+            self?.restartAfterRouteChange()
+        }
         observer = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification,
                                                           object: nil, queue: .main) { [weak self] notification in
             guard let self, self.isRecording,
@@ -87,6 +121,38 @@ final class PhoneVoiceMemo: ObservableObject {
 
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+    }
+
+    /// 마이크가 바뀐 뒤 새 형식으로 다시 건다. 형식이 달라지면 소리 파일을 새로 열어
+    /// 녹음이 끊기지 않게 한다(같은 노트의 녹음 목록에 두 파일로 남음).
+    private func restartAfterRouteChange() {
+        guard isRecording else { return }
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        // 아직 새 마이크가 준비되지 않았으면(0Hz) 다음 알림을 기다린다 — 걸면 앱이 꺼짐.
+        guard (try? VoiceMemoSaver.checkMicrophone(format)) != nil else { return }
+        // 바뀐 직후엔 출력 형식이 실제 마이크 형식과 아직 다를 수 있다 — 다르면 걸 때 앱이 꺼지므로 다음 알림을 기다린다.
+        let hardware = input.inputFormat(forBus: 0)
+        guard hardware.sampleRate == format.sampleRate, hardware.channelCount == format.channelCount else { return }
+        // 소리 받기를 먼저 떼어 소리 스레드가 파일에 쓰는 중에 파일을 바꾸지 않게 한다.
+        input.removeTap(onBus: 0)
+        if let file, file.processingFormat.sampleRate != format.sampleRate
+            || file.processingFormat.channelCount != format.channelCount {
+            self.file = try? VoiceMemoSaver.openFile(at: VoiceMemoSaver.newRecordingURL(noteID: noteID, date: Date()),
+                                                     format: format)
+        }
+        installTap(on: input, format: format)
+        engine.prepare()
+        try? engine.start()
+    }
+
+    private func installTap(on input: AVAudioInputNode, format: AVAudioFormat) {
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
+            try? self.file?.write(from: buffer)
+            self.transcriber.append(buffer)
+        }
     }
 
     /// 받아 적는 도중에도 바꿀 수 있다. 고른 언어는 다음 메모에도 쓴다.
@@ -122,21 +188,23 @@ final class PhoneVoiceMemo: ObservableObject {
 
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
+            try VoiceMemoSaver.checkMicrophone(format)
             let now = Date()
             file = try VoiceMemoSaver.openFile(at: VoiceMemoSaver.newRecordingURL(noteID: noteID, date: now), format: format)
             transcriber.onText = { [weak self] text in self?.text = text }
             transcriber.start(locale: locale)
             input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-                guard let self else { return }
-                try? self.file?.write(from: buffer)
-                self.transcriber.append(buffer)
-            }
+            installTap(on: input, format: format)
             engine.prepare()
             try engine.start()
             started = now
             isRecording = true
         } catch {
+            // 반쯤 켠 것을 정리한다(받아 적기·파일·녹음 세션). 세션을 켠 채 두면 다른 앱 소리가 멈춘 채 남는다.
+            engine.inputNode.removeTap(onBus: 0)
+            transcriber.stop()
+            file = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             errorMessage = "음성 메모를 시작하지 못했습니다: \(error.localizedDescription)"
         }
     }
@@ -152,9 +220,8 @@ final class PhoneVoiceMemo: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         let note = VoiceMemoSaver.save(id: noteID, date: started, text: text, fromWatch: false,
                                        folderID: folderID, store: store)
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            VoiceMemoSaver.refine(noteID: noteID, liveText: "", locale: locale, store: store)
-        }
+        // 실시간 글이 비었거나 중간에 끊겼으면(인식 실패·이어폰 바꿈 등) 녹음 파일로 다시 받아 채운다.
+        VoiceMemoSaver.refine(noteID: noteID, liveText: text, locale: locale, store: store)
         return note
     }
 }

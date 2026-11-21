@@ -91,6 +91,12 @@ struct NoteBrowser: View {
 
     /// 검색어. 있으면 폴더와 상관없이 모든 노트에서 찾는다.
     @State private var query = ""
+    /// 지울지 묻는 중인 노트들
+    @State private var notesToDelete: [UUID] = []
+    /// 지울지 묻는 창의 제목(String으로 정해 두어 컴파일러가 헷갈리지 않게)
+    private var deleteTitle: String {
+        notesToDelete.count > 1 ? "노트 \(notesToDelete.count)개를 지울까요?" : "노트를 지울까요?"
+    }
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
     private var searching: Bool { !trimmedQuery.isEmpty }
 
@@ -113,7 +119,8 @@ struct NoteBrowser: View {
                     noteRow(note)
                 }
                 .onDelete { offsets in
-                    offsets.map { notes[$0].id }.forEach { store.delete($0) }
+                    // 바로 지우지 않고 묻는다 — 사진·녹음까지 되살릴 수 없게 지워지므로(2026-11-21).
+                    notesToDelete = offsets.map { notes[$0].id }
                 }
             } header: {
                 if showsFolders {
@@ -207,6 +214,19 @@ struct NoteBrowser: View {
             guard case .success(let url) = result else { return }
             importPDF(url)
         }
+        .confirmationDialog(deleteTitle,
+                            isPresented: Binding(get: { !notesToDelete.isEmpty },
+                                                 set: { if !$0 { notesToDelete = [] } }),
+                            titleVisibility: .visible) {
+            Button("삭제", role: .destructive) {
+                let ids = notesToDelete
+                notesToDelete = []
+                ids.forEach { store.delete($0) }
+            }
+            Button("취소", role: .cancel) { notesToDelete = [] }
+        } message: {
+            Text("노트 안의 사진·녹음도 함께 지워지고 되살릴 수 없습니다.")
+        }
         .alert("불러오지 못했습니다", isPresented: $importFailed) {
             Button("확인", role: .cancel) {}
         }
@@ -292,7 +312,7 @@ struct NoteBrowser: View {
                 Label("폴더로 이동", systemImage: "folder")
             }
             Button(role: .destructive) {
-                store.delete(note.id)
+                notesToDelete = [note.id]
             } label: {
                 Label("삭제", systemImage: "trash")
             }

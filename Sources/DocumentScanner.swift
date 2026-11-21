@@ -98,14 +98,18 @@ enum ScanImporter {
         for (index, page) in pages.enumerated() where page.size.width > 0 {
             let scale = min(1, pixelWidth / page.size.width)
             let size = CGSize(width: (page.size.width * scale).rounded(), height: (page.size.height * scale).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            format.opaque = true
-            let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-                page.draw(in: CGRect(origin: .zero, size: size))
+            // 쪽마다 그림 메모리를 바로 비운다(많은 쪽을 스캔해도 메모리가 쌓이지 않게, 2026-11-21).
+            let data: Data? = autoreleasepool {
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                format.opaque = true
+                let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                    page.draw(in: CGRect(origin: .zero, size: size))
+                }
+                return image.jpegData(compressionQuality: 0.85)
             }
             let fileName = "scan-\(index + 1).jpg"
-            guard let data = image.jpegData(compressionQuality: 0.85),
+            guard let data,
                   (try? data.write(to: folder.appendingPathComponent(fileName))) != nil else { continue }
 
             let height = (pageWidth * size.height / size.width).rounded()

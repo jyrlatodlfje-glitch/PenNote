@@ -30,6 +30,9 @@ struct RepeatKey: View {
 
     @State private var pressed = false
     @State private var timer: Timer?
+    /// 손가락이 닿아 있는 동안만 참. 알림·전화로 동작이 끊겨도 저절로 거짓이 된다(onEnded는 안 올 수 있음).
+    @GestureState private var touching = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Image(systemName: icon)
@@ -39,6 +42,7 @@ struct RepeatKey: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, state, _ in state = true }
                     .onChanged { _ in
                         guard !pressed else { return }
                         pressed = true
@@ -49,6 +53,13 @@ struct RepeatKey: View {
                     }
                     .onEnded { _ in stop() }
             )
+            // 끊긴 동작으로 ⌫가 계속 돌아 글이 끝까지 지워지던 것을 막는다(2026-11-21).
+            .onChange(of: touching) { isTouching in
+                if !isTouching { stop() }
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase != .active { stop() }
+            }
             .onDisappear { stop() }
     }
 
@@ -108,6 +119,7 @@ struct NoteEditorView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var sharedItem: SharedItem?
     @State private var titleText: String
+    @State private var confirmLeaveWhileRecording = false
     @FocusState private var titleFocused: Bool
 
     init(note: Note) {
@@ -184,11 +196,25 @@ struct NoteEditorView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button {
-                    dismiss()
+                    // 녹음 중에 나가면 녹음이 알림 없이 끝나므로 먼저 묻는다(2026-11-21 검토).
+                    if audio.isRecording {
+                        confirmLeaveWhileRecording = true
+                    } else {
+                        dismiss()
+                    }
                 } label: {
                     Image(systemName: "chevron.left")
                 }
             }
+        }
+        .alert("녹음 중입니다", isPresented: $confirmLeaveWhileRecording) {
+            Button("녹음 멈추고 나가기", role: .destructive) {
+                audio.toggleRecording()
+                dismiss()
+            }
+            Button("계속 녹음", role: .cancel) {}
+        } message: {
+            Text("노트를 나가면 녹음이 끝납니다. 녹음 파일은 이 노트의 녹음 목록에 남습니다.")
         }
         .background(ContentSwipeBackDisabler())
         .onChange(of: titleText) { name in
@@ -202,12 +228,20 @@ struct NoteEditorView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button {
-                    audio.toggleRecording()
+                    // 음성 입력과 녹음은 마이크를 함께 쓴다. 둘을 같이 켰다가 하나를 끄면 다른 쪽도 조용히 멈추므로 막는다.
+                    // (음성 입력은 이미 소리를 녹음 목록에 남김, 2026-11-21)
+                    if !audio.isRecording && dictation.isListening {
+                        audio.errorMessage = "음성 입력 중에는 녹음을 함께 쓸 수 없습니다. 음성 입력 소리도 녹음 목록에 남습니다."
+                    } else {
+                        audio.toggleRecording()
+                    }
                 } label: {
                     Image(systemName: audio.isRecording ? "stop.circle.fill" : "record.circle")
                         .foregroundColor(audio.isRecording ? .red : .accentColor)
                 }
                 Button {
+                    // 녹음 목록에서 재생하면 소리 세션을 바꿔 음성 입력이 조용히 멈추므로, 먼저 음성 입력을 끝낸다(2026-11-21).
+                    stopDictation()
                     showRecordings = true
                 } label: {
                     Image(systemName: "waveform")
@@ -275,6 +309,12 @@ struct NoteEditorView: View {
                 audio.errorMessage = message
                 dictation.errorMessage = nil
             }
+        }
+        // 열린 동안 밖에서 들어오는 글(녹음으로 다시 받아 적은 글)을 이 종이에 넣게 알린다(NoteStore.openPage).
+        // 닫을 때 따로 빼지 않는다 — 위에 다른 화면이 덮여 onDisappear가 와도 이 종이는 살아 있으므로.
+        // 화면이 정말 닫히면 종이가 사라져 등록도 저절로 무효가 된다(약한 참조 + isAttached).
+        .onAppear {
+            store.attach(page, to: note.id)
         }
         .onDisappear {
             stopDictation()
@@ -681,11 +721,8 @@ struct NoteEditorView: View {
 
     /// 노트 제목을 파일 이름으로 해서 임시 파일을 만들고 공유 화면을 연다.
     private func share(_ data: Data, fileExtension: String) {
-        let name = note.title
-            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
-            .joined(separator: " ")
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(name)
+            .appendingPathComponent(BoardExport.safeFileName(note.title))
             .appendingPathExtension(fileExtension)
         do {
             try data.write(to: url, options: .atomic)

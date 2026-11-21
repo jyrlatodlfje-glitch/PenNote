@@ -6,6 +6,16 @@ final class PageController: ObservableObject {
     fileprivate weak var view: PageCanvasView?
     /// 노트 화면이 아직 열려 있는지. 닫혔으면 글은 노트 저장소로 직접 넣는다.
     var isAttached: Bool { view != nil }
+    /// 종이가 막 만들어졌을 때 한 번 부른다(NoteStore가 그사이 못 넣은 글을 넣으려고).
+    var onViewReady: (() -> Void)?
+
+    /// 종이가 화면에 자리를 잡았는지(폭이 정해졌는지).
+    var isLaidOut: Bool { (view?.bounds.width ?? 0) > 0 }
+
+    /// 글이 꼭 `string` 인 글상자가 이미 있는지.
+    func containsText(_ string: String) -> Bool {
+        view?.note.texts.contains { $0.text == string } ?? false
+    }
 
     func insert(_ string: String) { view?.insertText(string) }
     func focusForKeyboard() { view?.focusForKeyboard() }
@@ -13,6 +23,10 @@ final class PageController: ObservableObject {
     func textBeforeCursor() -> String { view?.textBeforeCursor() ?? "" }
     func backspace() { view?.backspace() }
     func followCursor() { view?.followCursor() }
+    /// 글이 `old` 와 꼭 같은 글상자를 `new` 로 바꾼다. 없으면 false.
+    func replaceText(_ old: String, with new: String) -> Bool {
+        view?.replaceTextItem(old, with: new) ?? false
+    }
     func replaceBeforeCursor(_ old: String, with new: String) -> Bool {
         view?.replaceBeforeCursor(old, with: new) ?? false
     }
@@ -40,6 +54,10 @@ struct PageCanvas: UIViewRepresentable {
     func makeUIView(context: Context) -> PageCanvasView {
         let view = PageCanvasView(note: initialNote)
         controller.view = view
+        // 화면 그리기가 끝난 뒤에 알린다(그리는 도중에 글을 바꾸지 않게).
+        DispatchQueue.main.async { [weak controller] in
+            controller?.onViewReady?()
+        }
         view.onSelectionChange = { [weak controller] hasSelection in
             DispatchQueue.main.async { controller?.hasSelection = hasSelection }
         }

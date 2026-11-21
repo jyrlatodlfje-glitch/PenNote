@@ -8,7 +8,8 @@ enum PDFImporter {
         defer {
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
-        guard let document = PDFDocument(url: url), document.pageCount > 0 else { return nil }
+        // 암호 걸린 PDF는 흰 쪽만 나오므로 "불러오지 못했습니다"로 알린다(2026-11-21).
+        guard let document = PDFDocument(url: url), document.pageCount > 0, !document.isLocked else { return nil }
 
         var note = Note()
         note.template = .blank
@@ -30,18 +31,22 @@ enum PDFImporter {
 
             let scale = pixelWidth / box.width
             let pixelSize = CGSize(width: pixelWidth, height: (box.height * scale).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            format.opaque = true
-            let image = UIGraphicsImageRenderer(size: pixelSize, format: format).image { context in
-                UIColor.white.setFill()
-                context.fill(CGRect(origin: .zero, size: pixelSize))
-                // PDF 좌표는 아래가 원점이라 위아래를 뒤집어 그린다.
-                context.cgContext.translateBy(x: 0, y: pixelSize.height)
-                context.cgContext.scaleBy(x: scale, y: -scale)
-                page.draw(with: .mediaBox, to: context.cgContext)
+            // 쪽마다 그림 메모리를 바로 비운다 — 안 비우면 100쪽 넘는 PDF에서 메모리가 넘쳐 앱이 꺼질 수 있음(2026-11-21).
+            let data: Data? = autoreleasepool {
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                format.opaque = true
+                let image = UIGraphicsImageRenderer(size: pixelSize, format: format).image { context in
+                    UIColor.white.setFill()
+                    context.fill(CGRect(origin: .zero, size: pixelSize))
+                    // PDF 좌표는 아래가 원점이라 위아래를 뒤집어 그린다.
+                    context.cgContext.translateBy(x: 0, y: pixelSize.height)
+                    context.cgContext.scaleBy(x: scale, y: -scale)
+                    page.draw(with: .mediaBox, to: context.cgContext)
+                }
+                return image.jpegData(compressionQuality: 0.8)
             }
-            guard let data = image.jpegData(compressionQuality: 0.8) else { continue }
+            guard let data else { continue }
             let fileName = "page-\(index + 1).jpg"
             guard (try? data.write(to: folder.appendingPathComponent(fileName))) != nil else { continue }
 

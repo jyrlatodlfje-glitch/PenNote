@@ -9,9 +9,10 @@ final class PageController: ObservableObject {
 
     func insert(_ string: String) { view?.insertText(string) }
     func focusForKeyboard() { view?.focusForKeyboard() }
-    func appendBlock(_ string: String) { view?.appendBlock(string) }
+    func appendBlock(_ string: String, follow: Bool = true) { view?.appendBlock(string, follow: follow) }
     func textBeforeCursor() -> String { view?.textBeforeCursor() ?? "" }
     func backspace() { view?.backspace() }
+    func followCursor() { view?.followCursor() }
     func replaceBeforeCursor(_ old: String, with new: String) -> Bool {
         view?.replaceBeforeCursor(old, with: new) ?? false
     }

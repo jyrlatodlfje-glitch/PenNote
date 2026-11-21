@@ -547,6 +547,7 @@ struct NoteEditorView: View {
             audio.errorMessage = "녹음 중에는 음성 입력을 함께 쓸 수 없습니다."
             return
         }
+        page.followCursor()
         endSession()
         alternatives = []
         dictatedSegment = ""
@@ -623,7 +624,7 @@ struct NoteEditorView: View {
             guard Double(result.count) > Double(live.count) * 1.2 + 20 else { return }
             let block = "[녹음으로 다시 받아 적은 글]\n" + result
             if page.isAttached {
-                page.appendBlock(block)
+                page.appendBlock(block, follow: false)
             } else {
                 store.appendText(block, to: noteID)
             }
@@ -716,6 +717,7 @@ struct NoteEditorView: View {
     }
 
     private func type(_ string: String) {
+        page.followCursor()
         endSession()
         recognizer.enqueue {
             page.insert(string)
@@ -724,6 +726,7 @@ struct NoteEditorView: View {
     }
 
     private func backspace() {
+        page.followCursor()
         endSession()
         recognizer.enqueue {
             page.backspace()
@@ -743,6 +746,7 @@ struct NoteEditorView: View {
             }
             return
         }
+        page.followCursor()
         var preceding = page.textBeforeCursor()
         if preceding.hasSuffix(sessionText) {
             preceding.removeLast(sessionText.count)

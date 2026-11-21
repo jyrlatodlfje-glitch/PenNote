@@ -59,6 +59,17 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     private lazy var movePan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
     private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
     private lazy var lassoPan = UIPanGestureRecognizer(target: self, action: #selector(handleLasso))
+    /// 글상자는 꾹 누른 뒤 끌어야 옮겨진다. 그냥 밀면 노트가 스크롤된다(2026-11-21: 음성 글 상자가 끌려와 읽기 어려웠음).
+    private lazy var moveHold: UILongPressGestureRecognizer = {
+        let gesture = UILongPressGestureRecognizer(target: self, action: #selector(handleHold))
+        gesture.minimumPressDuration = 0.35
+        return gesture
+    }()
+    private var holdStart = CGPoint.zero
+    /// 손가락으로 다른 곳을 보러 갔으면, 받아쓰기 글이 들어와도 화면을 커서 쪽으로 끌고 가지 않는다.
+    /// 페이지를 누르거나, 글씨 칸·키·마이크로 쓰기 시작하면 다시 커서를 따라간다.
+    private var keepPosition = false
+    private var userOffset = CGPoint.zero
 
     // 올가미: 둘러싼 글자·사진·필기를 한꺼번에 옮긴다.
     private let overlay = UIView()
@@ -126,7 +137,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         canvas.addSubview(overlay)
 
         lassoPan.maximumNumberOfTouches = 1
-        for gesture in [tap, movePan, pinch, lassoPan] as [UIGestureRecognizer] {
+        for gesture in [tap, movePan, pinch, lassoPan, moveHold] as [UIGestureRecognizer] {
             gesture.delegate = self
             canvas.addGestureRecognizer(gesture)
         }
@@ -232,6 +243,8 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         canvas.drawingPolicy = selecting || lassoing ? .pencilOnly : .anyInput
         tap.isEnabled = selecting || lassoing
         movePan.isEnabled = selecting
+        moveHold.isEnabled = selecting
+        canvas.isScrollEnabled = true
         pinch.isEnabled = selecting
         lassoPan.isEnabled = lassoing
         if !selecting {
@@ -350,6 +363,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     /// 키보드로 쓰기 시작: 고른 글상자가 없으면 지금 보이는 곳에 만들고, 아이폰 키보드를 띄운다.
     func focusForKeyboard() {
+        keepPosition = false
         if selectedTextView == nil {
             createText(at: CGPoint(x: insertLeft + 16, y: visibleTop + Self.lineHeight))
         }
@@ -365,7 +379,11 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     }
 
     /// 기존 내용과 겹치지 않게 페이지 맨 아래에 새 글상자로 넣는다.
-    func appendBlock(_ string: String) {
+    /// `follow`가 false면(녹음을 다시 받아 적은 글처럼 저절로 들어오는 글) 보던 자리를 지킨다.
+    func appendBlock(_ string: String, follow: Bool = true) {
+        if follow {
+            keepPosition = false
+        }
         deselect()
         if isBoard {
             // 화이트보드에는 '맨 아래'가 없으므로 지금 보고 있는 곳에 넣는다.
@@ -374,6 +392,11 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             createText(at: CGPoint(x: 16, y: contentBottom() + Self.lineHeight * 1.5))
         }
         insertText(string)
+    }
+
+    /// 글씨 칸·키·마이크로 쓰기 시작할 때: 다시 커서를 따라가게 한다.
+    func followCursor() {
+        keepPosition = false
     }
 
     func backspace() {
@@ -558,7 +581,12 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === movePan {
-            guard let id = selectedID, let view = itemView(id) else { return false }
+            // 그냥 끌어서 옮기는 것은 사진만. 글상자 위에서 밀면 노트가 스크롤된다.
+            guard let id = selectedID, let view = imageViews[id] else { return false }
+            return view.frame.insetBy(dx: -20, dy: -20).contains(gestureRecognizer.location(in: underlay))
+        }
+        if gestureRecognizer === moveHold {
+            guard let id = selectedID, let view = textViews[id] else { return false }
             return view.frame.insetBy(dx: -20, dy: -20).contains(gestureRecognizer.location(in: underlay))
         }
         if gestureRecognizer === pinch {
@@ -813,6 +841,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
     }
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        keepPosition = false
         if currentTool == .lasso {
             clearLasso()
             return
@@ -850,6 +879,30 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
                 view.frame.origin = CGPoint(x: dragStart.minX + move.x, y: max(0, dragStart.minY + move.y))
             }
             layoutHandle()
+        case .ended, .cancelled:
+            storeFrame(id, view.frame)
+        default:
+            break
+        }
+    }
+
+    /// 고른 글상자를 꾹 누른 뒤 끌면 옮긴다. 옮기는 동안은 노트가 스크롤되지 않는다.
+    @objc private func handleHold(_ gesture: UILongPressGestureRecognizer) {
+        let finished = gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed
+        if finished {
+            canvas.isScrollEnabled = true
+        }
+        guard let id = selectedID, let view = textViews[id] else { return }
+        let point = gesture.location(in: underlay)
+        switch gesture.state {
+        case .began:
+            dragStart = view.frame
+            holdStart = point
+            canvas.isScrollEnabled = false
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .changed:
+            view.frame.origin = CGPoint(x: dragStart.minX + point.x - holdStart.x,
+                                        y: max(0, dragStart.minY + point.y - holdStart.y))
         case .ended, .cancelled:
             storeFrame(id, view.frame)
         default:
@@ -895,6 +948,7 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
             deselect()
         }
         selectedID = id
+        keepPosition = false
         if let view = itemView(id) {
             view.layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.6).cgColor
             view.layer.borderWidth = 1
@@ -1001,8 +1055,37 @@ final class PageCanvasView: UIView, PKCanvasViewDelegate, UITextViewDelegate, UI
         }
     }
 
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        keepPosition = true
+    }
+
+    func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+        // 화면 맨 위(시계)를 눌러 맨 위로 가는 것은 회원님이 하신 것이므로 막지 않는다.
+        keepPosition = false
+        return true
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+            || scrollView.isZooming || scrollView.isZoomBouncing {
+            userOffset = scrollView.contentOffset
+        } else if keepPosition {
+            // 손으로 옮긴 것이 아닌데 화면이 움직였다(받아쓰기 글이 들어와 커서 쪽으로 끌려감) → 보던 자리로 되돌린다.
+            let held = heldOffset()
+            if scrollView.contentOffset != held {
+                scrollView.contentOffset = held
+            }
+        }
         updateVisibleImages()
+    }
+
+    /// 손으로 옮겨 둔 자리. 글이 줄어 종이가 짧아졌으면 갈 수 있는 끝까지만.
+    private func heldOffset() -> CGPoint {
+        let inset = canvas.adjustedContentInset
+        let maxX = max(-inset.left, canvas.contentSize.width + inset.right - canvas.bounds.width)
+        let maxY = max(-inset.top, canvas.contentSize.height + inset.bottom - canvas.bounds.height)
+        return CGPoint(x: min(max(userOffset.x, -inset.left), maxX),
+                       y: min(max(userOffset.y, -inset.top), maxY))
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
